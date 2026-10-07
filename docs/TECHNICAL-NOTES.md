@@ -25,3 +25,7 @@ PRoot-Distro/CHROOT integration validates the Debian container with a real `/bin
 ## Execução de scripts
 
 O CLI nunca executa `*.sh` diretamente: resolve o `bash` (`$BASH` só se existir, depois `$PREFIX/bin/bash`, depois PATH) e executa `bash script.sh`. Falhas de `execv` são devolvidas ao pai por um pipe `CLOEXEC` e impressas com `strerror`, evitando códigos 127 sem mensagem.
+
+## Modo Wine
+
+O startup do mingw-w64 é compilado para uma CRT específica (UCRT ou msvcrt), então não dá para trocar só com uma flag em todo toolchain. `select_wine_crt` valida por teste: compila um `wWinMain` com `std::filesystem`, lê as importações do PE e só aceita um compilador sem `api-ms-win-crt-*`/`ucrtbase.dll`. Só o instalador e a variante `wine` (x86) usam msvcrt; os apps x86/x64/arm64 seguem em UCRT. O payload W2EA ganha entradas `wine/...`; o instalador escolhe `wine` quando `ntdll!wine_get_version` existe (ou `--wine`) e a variante está presente, senão a arquitetura nativa. O assistente não usa threads: extrai na thread da UI e bombeia mensagens entre arquivos para atualizar a barra.

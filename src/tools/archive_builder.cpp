@@ -1,4 +1,4 @@
-// Empacota dist/{x86,x64,arm64}/** no formato W2EA lido pelo instalador.
+// Empacota dist/{x86,x64,arm64}/** (e dist/wine/**, se existir) no formato W2EA lido pelo instalador.
 // Formato: "W2EA\0" | u32 n | n x ( u16 nome_len | nome "arch/rel/path" | u64 tam | bytes ) — little-endian.
 #include <algorithm>
 #include <cstdint>
@@ -22,6 +22,10 @@ int main(int argc, char** argv) {
         if (!fs::is_directory(d)) { std::cerr << "diretório ausente: " << d << "\n"; return 3; }
         for (auto& e : fs::recursive_directory_iterator(d))
             if (e.is_regular_file()) files.emplace_back(std::string(arch) + "/" + e.path().lexically_relative(d).generic_string(), e.path());
+    }
+    if (fs::path d = root / "wine"; fs::is_directory(d)) {   // variante Wine (opcional)
+        for (auto& e : fs::recursive_directory_iterator(d))
+            if (e.is_regular_file()) files.emplace_back("wine/" + e.path().lexically_relative(d).generic_string(), e.path());
     }
     std::sort(files.begin(), files.end());
     std::ofstream f(out, std::ios::binary | std::ios::trunc);

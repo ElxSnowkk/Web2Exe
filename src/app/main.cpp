@@ -27,6 +27,22 @@ static constexpr IID IID_ControllerCompleted{0x6C4819F3, 0xC9B7, 0x4260, {0x81, 
 static constexpr IID IID_EnvironmentCompleted{0x4E8A3389, 0xC9D8, 0x4BD2, {0xB6, 0xB5, 0x12, 0x4F, 0xEE, 0x6C, 0xC1, 0x4D}};
 }  // namespace mswebview2
 
+#ifdef WEB2EXE_WINE
+// Modo Wine: o WebView2 Runtime não existe no Wine. Se estivermos sob Wine (ou com --wine),
+// abrimos a URL no navegador do sistema hospedeiro (winebrowser/xdg-open) e encerramos.
+static bool running_under_wine() {
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+    return nt && GetProcAddress(nt, "wine_get_version") != nullptr;
+}
+static int wine_fallback() {
+    HINSTANCE r = ShellExecuteW(nullptr, L"open", kUrl, nullptr, nullptr, SW_SHOWNORMAL);
+    if ((INT_PTR)r > 32) return 0;
+    std::wstring m = std::wstring(L"Este ambiente (Wine) não tem o Microsoft WebView2 Runtime nem navegador configurado.\n\nAbra o endereço manualmente:\n") + kUrl;
+    MessageBoxW(nullptr, m.c_str(), kName, MB_ICONINFORMATION | MB_OK);
+    return 0;
+}
+#endif
+
 static void safe_release(IUnknown* p) { if (p) p->Release(); }
 static void resize() {
     if (g_controller && g_hwnd) { RECT r{}; GetClientRect(g_hwnd, &r); g_controller->put_Bounds(r); }
@@ -119,7 +135,12 @@ static int fail_exit(const wchar_t* msg, int code) {
     return code;
 }
 
-int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int show) {
+int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR cmdline, int show) {
+#ifdef WEB2EXE_WINE
+    if (running_under_wine() || (cmdline && wcsstr(cmdline, L"--wine"))) return wine_fallback();
+#else
+    (void)cmdline;
+#endif
     // Instância única: se já estiver aberto, apenas traz a janela existente para frente.
     std::wstring cls = std::wstring(L"Web2Exe_") + kAppId;
     HANDLE mutex = CreateMutexW(nullptr, TRUE, (std::wstring(L"Local\\") + cls).c_str());

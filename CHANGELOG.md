@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0
+**Instalador único com modo Wine e assistente gráfico**
+- Corrige o erro `api-ms-win-crt-runtime-l1-1-0.dll._initialize_wide_environment ... unimplemented` em Wine antigo (Boxedwine/ExeBrowser, Wine 1.7): o instalador (x86) passa a ser ligado à `msvcrt.dll`, que existe no Windows e em qualquer Wine.
+- O mesmo instalador carrega uma variante `wine/` do app (x86, msvcrt). Ao detectar Wine (`ntdll!wine_get_version`, ou `--wine`), ele instala **somente** essa variante; no Windows instala x86/x64/arm64 como antes.
+- A variante Wine não usa WebView2: abre a URL no navegador do host ou mostra o endereço.
+- `WINE_COMPAT=auto|1|0` no build.prop (padrão `auto`: inclui a variante se houver toolchain msvcrt; `1` exige; `0` desativa). `web2exe --wine` = `1`.
+- `select_wine_crt` valida o toolchain por teste (compila e confere as importações do PE) e tenta, em ordem: toolchain atual, `-mcrtdll=msvcrt`, `WEB2EXE_MSVCRT_TOOL_DIR`, e (só Linux comum) o LLVM-MinGW msvcrt baixado. Instalador e variante Wine são verificados no final: o build falha se sobrar `api-ms-win-crt-*`/`ucrtbase.dll`.
+- **Instalador com telas**: boas-vindas (nome, versão, pasta de destino, aviso de Wine), progresso com barra e arquivo atual, e conclusão com opção "Abrir o aplicativo agora". `/S` continua silencioso.
+
 ## 1.1.1
 - `src/app/compat/EventToken.h` redireciona para o `eventtoken.h` (minúsculo) do mingw-w64; WebView2.h pede o nome do Windows SDK.
 

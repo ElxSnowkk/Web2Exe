@@ -182,6 +182,12 @@ static bool validate(const Props& c, std::string& why) {
     if (url.size() > 2048 || has_bad_control(url) || url.rfind("https://", 0) != 0 || url.size() <= 8 ||
         url.find_first_of(" \t<>\"'\\") != std::string::npos) { why = "APP_URL deve ser uma URL HTTPS válida"; return false; }
 
+    if (c.count("WINE_COMPAT")) {
+        std::string w = lower(c.at("WINE_COMPAT"));
+        if (w != "0" && w != "1" && w != "true" && w != "false" && w != "yes" && w != "no" && w != "on" && w != "off" && w != "sim" && w != "auto" && !w.empty()) {
+            why = "WINE_COMPAT deve ser auto, 0 ou 1"; return false;
+        }
+    }
     std::error_code ec;
     if (logo.empty() || !fs::is_regular_file(logo, ec)) { why = "APP_LOGO não aponta para um arquivo: " + logo; return false; }
     std::ifstream lg(logo, std::ios::binary);
@@ -292,15 +298,17 @@ static void help() {
 "  --chroot / --proot     compila dentro de um Debian (chroot-distro / proot-distro)\n"
 "  --properties           lê as propriedades pela entrada padrão\n"
 "  --properties-file <f>  lê as propriedades de um arquivo\n"
-"  --check                só valida o build.prop, sem compilar\n\n"
+"  --check                só valida o build.prop, sem compilar\n"
+"  --wine                 exige a variante Wine no instalador único (padrão: auto)\n\n"
 "Formato do build.prop:\n"
-"  APP_NAME=Imobiliária Terra e Prata\n"
-"  APP_ID=imobiliaria-terraeprata\n"
+"  APP_NAME=Meu Aplicativo\n"
+"  APP_ID=meu-aplicativo\n"
 "  APP_VERSION=1.0.0\n"
-"  APP_URL=https://terraeprata.site.je\n"
+"  APP_URL=https://example.com\n"
 "  APP_LOGO=/caminho/logo.png\n"
-"  APP_ICON=/caminho/emblema.ico\n"
-"  INSTALL_DIR=Imobiliária Terra e Prata\n\n"
+"  APP_ICON=/caminho/icone.ico\n"
+"  INSTALL_DIR=Meu Aplicativo\n"
+"  WINE_COMPAT=auto               (opcional: auto | 1 | 0 — variante Wine dentro do instalador)\n\n"
 "Linhas indentadas continuam o valor da propriedade anterior.\n";
 }
 
@@ -540,6 +548,7 @@ int main(int argc, char** argv) {
         else if (a == "clean" || a == "--clean") do_clean = true;
         else if (a == "build") do_build = true;
         else if (a == "--check") check_only = true;
+        else if (a == "--wine") setenv("WEB2EXE_WINE", "1", 1);
         else if (a == "--termux") term = true;
         else if (a == "--linux") term = false;
         else if (a == "--chroot") mode = "chroot";

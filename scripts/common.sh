@@ -54,13 +54,16 @@ prop_load() {
   APP_NAME="${PROP[APP_NAME]:-}"; APP_ID="${PROP[APP_ID]:-}"; APP_VERSION="${PROP[APP_VERSION]:-1.0.0}"
   APP_URL="${PROP[APP_URL]:-}"; APP_LOGO="${PROP[APP_LOGO]:-}"; APP_ICON="${PROP[APP_ICON]:-}"
   INSTALL_DIR="${PROP[INSTALL_DIR]:-$APP_NAME}"
+  # auto (padrão) = o instalador inclui a variante Wine se o toolchain conseguir gerá-la; 1 = obrigatório; 0 = não incluir.
+  WINE_COMPAT="${WEB2EXE_WINE:-${PROP[WINE_COMPAT]:-auto}}"
+  case "${WINE_COMPAT,,}" in 1|true|yes|on|sim) WINE_COMPAT=1;; 0|false|no|off|nao|não) WINE_COMPAT=0;; *) WINE_COMPAT=auto;; esac
   [[ "$APP_LOGO" == "~/"* ]] && APP_LOGO="$HOME/${APP_LOGO#\~/}"
   [[ "$APP_ICON" == "~/"* ]] && APP_ICON="$HOME/${APP_ICON#\~/}"
   if [[ -n "$APP_LOGO" && "$APP_LOGO" != /* ]]; then APP_LOGO="$PROJECT_ROOT/$APP_LOGO"; fi
   if [[ -n "$APP_ICON" && "$APP_ICON" != /* ]]; then APP_ICON="$PROJECT_ROOT/$APP_ICON"; fi
   APP_NAME_SAFE="$(ascii_slug "$APP_NAME")"; APP_ID_SAFE="$(ascii_slug "$APP_ID")"
   [[ -n "$APP_NAME_SAFE" ]] || APP_NAME_SAFE="$APP_ID_SAFE"
-  export APP_NAME APP_ID APP_VERSION APP_URL APP_LOGO APP_ICON INSTALL_DIR APP_NAME_SAFE APP_ID_SAFE
+  export APP_NAME APP_ID APP_VERSION APP_URL APP_LOGO APP_ICON INSTALL_DIR APP_NAME_SAFE APP_ID_SAFE WINE_COMPAT
 }
 
 # "Imobiliária Terra e Prata" -> "Imobiliaria-Terra-e-Prata" (seguro para nome de arquivo).
@@ -106,7 +109,7 @@ fetch() {
 # Prefixo de triple por alvo.
 triple_prefix() {
   case "$1" in
-    x86) echo i686;; x64) echo x86_64;; arm64) echo aarch64;;
+    x86|wine|installer) echo i686;; x64) echo x86_64;; arm64) echo aarch64;;
     *) fail "Alvo inválido: $1";;
   esac
 }
@@ -176,7 +179,97 @@ select_toolchain() {
   done
   [[ -x "$CXX" ]] || fail "Compilador ausente para $target: $CXX"
   [[ -n "$RC" ]]  || fail "Nenhum compilador de recursos (windres/llvm-rc) encontrado."
+  WINE_FLAGS=()
+  # Só a variante "wine" e o instalador (que também roda em Wine) usam msvcrt; x86/x64/arm64 seguem em UCRT.
+  if [[ "${WINE_COMPAT:-0}" == 1 && ( "$target" == wine || "$target" == installer ) ]]; then select_wine_crt "$target"; fi
   export CC CXX RC
+}
+
+
+# ------------------------------------------------------- modo Wine (msvcrt) ----
+# Wine antigo (ex.: Boxedwine/ExeBrowser, Wine 1.7) não tem a UCRT (api-ms-win-crt-*.dll).
+# No modo Wine, o instalador e a variante "wine" do app (x86) são ligados à msvcrt.dll, que todo Wine possui;
+# os apps x86/x64/arm64 para Windows de verdade continuam em UCRT.
+UCRT_IMPORT_RE='(api-ms-win-crt-|ucrtbase\.dll)'
+
+# Imprime as DLLs importadas por um PE.
+pe_imports() {
+  local od; od="$(tool_path llvm-objdump)"
+  [[ -n "$od" ]] || fail "llvm-objdump ausente (pkg install llvm) — necessário para validar o modo Wine"
+  "$od" -p "$1" 2>/dev/null | awk '/DLL Name:/{print $3}' | sort -u
+}
+tool_path() {
+  local t="$1"
+  if [[ -n "${TOOL_DIR:-}" && -x "$TOOL_DIR/$t" ]]; then echo "$TOOL_DIR/$t"; return; fi
+  command -v "$t" || true
+}
+
+# O PE depende da UCRT? (0 = sim, 1 = não)
+pe_uses_ucrt() { local imp; imp="$(pe_imports "$1")"; grep -Eiq "$UCRT_IMPORT_RE" <<<"$imp"; }
+need_objdump() { [[ -n "$(tool_path llvm-objdump)" ]] || fail "llvm-objdump ausente (pkg install llvm) — necessário para validar o modo Wine"; }
+
+# Compila um programa mínimo (wWinMain, std::wstring, <filesystem>) e vê se ele evita a UCRT.
+# probe_crt <compilador> [flags...]
+probe_crt() {
+  local cxx="$1"; shift
+  local d="$TMP_DIR/crtprobe"; mkdir -p "$d"
+  cat > "$d/p.cpp" <<'CPPEOF'
+#include <windows.h>
+#include <filesystem>
+#include <string>
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR a, int) { std::wstring s = a ? a : L""; std::error_code e; return (int)(s.size() + std::filesystem::exists(L"C:\\", e)); }
+CPPEOF
+  rm -f "$d/p.exe"
+  "$cxx" "$@" -std=c++20 -O1 -static -fuse-ld=lld -DUNICODE -D_UNICODE -municode -mwindows "$d/p.cpp" -o "$d/p.exe" >"$d/log.txt" 2>&1 || return 2
+  [[ -f "$d/p.exe" ]] || return 2
+  pe_uses_ucrt "$d/p.exe" && return 1
+  return 0
+}
+
+# Define WINE_CXX/WINE_CC/WINE_FLAGS para x86|x64 (chamada por select_toolchain).
+# Ordem de tentativa: (1) o compilador atual já é msvcrt; (2) -mcrtdll=msvcrt;
+# (3) toolchain msvcrt indicado em WEB2EXE_MSVCRT_TOOL_DIR; (4) baixa o LLVM-MinGW msvcrt (só Linux comum).
+select_wine_crt() {
+  local target="$1" p cand_dir cand_cxx rc=0; p="$(triple_prefix "$target")"
+  need_objdump
+  WINE_FLAGS=()
+  probe_crt "$CXX" && { ok "[$target] toolchain atual já usa msvcrt"; return 0; } || rc=$?
+  if probe_crt "$CXX" -mcrtdll=msvcrt; then
+    WINE_FLAGS=(-mcrtdll=msvcrt); ok "[$target] msvcrt via -mcrtdll=msvcrt"; return 0
+  fi
+  for cand_dir in "${WEB2EXE_MSVCRT_TOOL_DIR:-}" "${WINE_TOOL_DIR:-}"; do
+    [[ -n "$cand_dir" && -x "$cand_dir/${p}-w64-mingw32-clang++" ]] || continue
+    cand_cxx="$cand_dir/${p}-w64-mingw32-clang++"
+    if probe_crt "$cand_cxx"; then
+      TOOL_DIR="$cand_dir"; CXX="$cand_cxx"; CC="$cand_dir/${p}-w64-mingw32-clang"; export TOOL_DIR CXX CC
+      ok "[$target] msvcrt via toolchain $cand_dir"; return 0
+    fi
+  done
+  # Linux comum (não Termux): baixa o LLVM-MinGW msvcrt.
+  if [[ "${PREFIX:-}" != *com.termux* && -z "${WEB2EXE_WINE_NO_DOWNLOAD:-}" ]]; then
+    local saved_tool="$TOOL_DIR" saved_root="${LLVM_ROOT:-}"
+    LLVM_CRT=msvcrt prepare_tools || true
+    cand_cxx="$TOOL_DIR/${p}-w64-mingw32-clang++"
+    if [[ "$TOOL_DIR" != "$saved_tool" && -x "$cand_cxx" ]] && probe_crt "$cand_cxx"; then
+      WINE_TOOL_DIR="$TOOL_DIR"; CXX="$cand_cxx"; CC="$TOOL_DIR/${p}-w64-mingw32-clang"; export WINE_TOOL_DIR CXX CC
+      ok "[$target] msvcrt via LLVM-MinGW msvcrt baixado"; return 0
+    fi
+    TOOL_DIR="$saved_tool"; LLVM_ROOT="$saved_root"; export TOOL_DIR LLVM_ROOT
+  fi
+  fail "Modo Wine: nenhum toolchain gerou binário sem UCRT para $target (probe rc=$rc; log: $TMP_DIR/crtprobe/log.txt).
+       Instale um LLVM-MinGW *msvcrt* e aponte WEB2EXE_MSVCRT_TOOL_DIR para a pasta bin/ dele
+       (https://github.com/mstorsjo/llvm-mingw/releases → llvm-mingw-<data>-msvcrt-*)."
+}
+
+# Falha se um .exe/.dll do modo Wine ainda depende da UCRT.
+verify_wine_pe() {
+  local f="$1" label="${2:-$1}" bad imp
+  need_objdump
+  imp="$(pe_imports "$f")"
+  [[ -n "$imp" ]] || fail "Modo Wine: não foi possível ler as importações de $label"
+  bad="$(grep -Ei "$UCRT_IMPORT_RE" <<<"$imp" || true)"
+  [[ -z "$bad" ]] || fail "Modo Wine: $label ainda importa a UCRT ($(echo $bad | tr '\n' ' ')). O Wine 1.7/Boxedwine não tem essas DLLs."
+  ok "Modo Wine: $label sem dependência de UCRT"
 }
 
 # Compila os utilitários de host (rodam no Termux/Linux, não no Windows).
