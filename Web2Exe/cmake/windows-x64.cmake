@@ -1,3 +1,0 @@
-set(CMAKE_SYSTEM_PROCESSOR AMD64)
-set(WEB2EXE_TRIPLE_PREFIX x86_64)
-include(${CMAKE_CURRENT_LIST_DIR}/windows-common.cmake)
