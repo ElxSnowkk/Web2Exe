@@ -1,81 +1,57 @@
 # Web2Exe
 
-Web2Exe is a universal Windows application builder that converts websites into native C++ WebView2 applications.
+Transforma uma URL em aplicativo Windows nativo (Win32 + Microsoft WebView2), sem Electron nem Chromium embutido.
+Compila **no próprio Android (Termux)** ou em Linux, gerando x86, x64 e ARM64 e um instalador universal.
 
-It detects the build environment, supports Termux and Linux, generates Windows x86, x64, and ARM64 builds, includes required runtime DLLs, and creates a universal Windows installer.
+> Versão 1.1.0 — ver [CHANGELOG](CHANGELOG.md).
 
-## Features
+## Instalação (Termux)
 
-- Native C++ and WebView2 applications
-- `build.prop` based configuration
-- PNG logo and ICO support
-- Automatic Termux detection
-- CHROOT and PRoot build modes
-- Native Linux build mode
-- Automatic host architecture detection
-- Windows x86, x64, and ARM64 builds
-- Automatic runtime DLL collection
-- Universal Windows installer
-- Multilingual terminal interface
-- `--help` and `--version` commands
-
-## Quick Start
-
-### Termux
-
-```bash
-web2exe --termux --proot
+```sh
+pkg install cmake clang ninja curl unzip llvm lld llvm-mingw-w64 llvm-mingw-w64-ucrt llvm-mingw-w64-tools
+./install.sh
+web2exe doctor
 ```
 
-or:
+## Uso
 
-```bash
-web2exe --termux --chroot
+Crie um `build.prop` na pasta do projeto:
+
+```ini
+APP_NAME=Imobiliária Terra e Prata
+APP_ID=imobiliaria-terraeprata
+APP_VERSION=1.0.0
+APP_URL=https://terraeprata.site.je
+APP_LOGO=/sdcard/Download/emblema.png
+APP_ICON=/sdcard/Download/emblema.ico
+INSTALL_DIR=Imobiliária Terra e Prata
 ```
 
-### Linux
-
-```bash
-web2exe --linux
+```sh
+web2exe --check --properties-file build.prop   # só valida
+web2exe build                                  # compila usando ./build.prop (Termux nativo por padrão)
+web2exe --termux --native --properties-file build.prop
+web2exe --termux --proot  --properties-file build.prop   # dentro de um Debian (proot-distro)
+web2exe clean
 ```
 
-### Help
+Resultado em `dist/`: `<Nome>-Setup.exe` (instalador universal) e `dist/{x86,x64,arm64}/`.
 
-```bash
-web2exe --help
+Observações:
+- `APP_ICON` precisa ser um `.ico` de verdade (um PNG renomeado é rejeitado).
+- Nomes de arquivo gerados são ASCII (`Imobiliária` → `Imobiliaria`); o nome exibido ao usuário mantém os acentos.
+- O instalador instala por usuário em `%LOCALAPPDATA%\<INSTALL_DIR>` (sem administrador), cria atalhos e registra a desinstalação.
+- O app exige o *WebView2 Runtime* (já vem no Windows 10/11 atualizado); se faltar, oferece abrir a página de download.
+
+## Diagnóstico
+
+```sh
+bash scripts/diagnose.sh            # valida ambiente + build.prop, mostra stdout e stderr, salva web2exe-diagnose.log
+bash scripts/diagnose.sh --build    # idem, e tenta compilar
 ```
 
-### Version
+Nenhuma etapa falha em silêncio: toda falha de execução imprime `[ERR ]` com o motivo.
 
-```bash
-web2exe --version
-```
+## Arquitetura
 
-## Configuration
-
-Project settings are stored in `build.prop`, including:
-
-```text
-APP_NAME
-APP_ID
-APP_URL
-APP_LOGO
-APP_ICON
-INSTALL_DIR
-```
-
-## Output
-
-Web2Exe generates:
-
-```text
-Windows x86
-Windows x64
-Windows ARM64
-```
-
-All required files are packaged into a single universal Windows installer. The installer automatically detects the target Windows architecture and installs the appropriate build.
-
-## License
-
-MIT License.
+Ver `docs/TECHNICAL-NOTES.md`.
