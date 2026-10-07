@@ -1,9 +1,0 @@
-build/
-dist/
-.cache/
-.web2exe-tmp/
-.web2exe-tmp-appgen
-web2exe-cache/
-*.log
-*.tmp
-*.part

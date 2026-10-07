@@ -1,7 +1,0 @@
-APP_NAME=Web2Exe Example
-APP_ID=web2exe-example
-APP_VERSION=1.0.0
-APP_URL=https://example.com
-APP_LOGO=assets/logo.png
-APP_ICON=assets/icon.ico
-INSTALL_DIR=Web2Exe Example

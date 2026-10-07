@@ -1,3 +1,0 @@
-set(CMAKE_SYSTEM_PROCESSOR X86)
-set(WEB2EXE_TRIPLE_PREFIX i686)
-include(${CMAKE_CURRENT_LIST_DIR}/windows-common.cmake)
