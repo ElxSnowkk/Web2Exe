@@ -1,0 +1,74 @@
+name: Extrair e compilar Web2Exe
+
+# Coloque este arquivo em .github/workflows/ de um repositório que contenha o zip
+# (ex.: Web2Exe-v1_2_0.zip na raiz). Ele extrai o zip e compila o instalador.
+on:
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: "Caminho do zip no repositório (vazio = primeiro Web2Exe*.zip da raiz)"
+        required: false
+        default: ""
+      app_name:
+        description: "APP_NAME"
+        default: "Imobiliária Terra e Prata"
+      app_id:
+        description: "APP_ID"
+        default: "imobiliaria-terraeprata"
+      app_url:
+        description: "APP_URL"
+        default: "https://terraeprata.site.je"
+      wine_compat:
+        description: "WINE_COMPAT (auto | 1 | 0)"
+        default: "1"
+  push:
+    paths: ["Web2Exe*.zip"]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Localizar e extrair o zip
+        id: extract
+        run: |
+          zip="${{ github.event.inputs.zip_path }}"
+          [ -n "$zip" ] || zip="$(ls Web2Exe*.zip 2>/dev/null | sort -V | tail -n1)"
+          [ -f "$zip" ] || { echo "::error::zip não encontrado (informe zip_path)"; exit 1; }
+          rm -rf "$RUNNER_TEMP/w2e" && mkdir -p "$RUNNER_TEMP/w2e"
+          unzip -q "$zip" -d "$RUNNER_TEMP/w2e"
+          root="$(dirname "$(find "$RUNNER_TEMP/w2e" -type f -name CMakeLists.txt -path '*Web2Exe*' -not -path '*/node_modules/*' | head -n1)")"
+          [ -d "$root/scripts" ] || { echo "::error::pasta do Web2Exe não encontrada dentro do zip"; exit 1; }
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+          echo "Extraído: $zip -> $root"; ls "$root"
+
+      - name: Dependências
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build curl xz-utils unzip clang llvm
+
+      - name: Gerar build.prop
+        working-directory: ${{ steps.extract.outputs.root }}
+        run: |
+          cat > build.prop <<EOF
+          APP_NAME=${{ github.event.inputs.app_name || 'Web2Exe CI' }}
+          APP_ID=${{ github.event.inputs.app_id || 'web2exe-ci' }}
+          APP_VERSION=1.0.0
+          APP_URL=${{ github.event.inputs.app_url || 'https://example.com' }}
+          APP_LOGO=$PWD/assets/logo.png
+          APP_ICON=$PWD/assets/icon.ico
+          INSTALL_DIR=${{ github.event.inputs.app_name || 'Web2Exe CI' }}
+          WINE_COMPAT=${{ github.event.inputs.wine_compat || '1' }}
+          EOF
+          sed -i 's/^ *//' build.prop
+          cat build.prop
+
+      - name: Compilar (x86, x64, arm64, variante Wine e instalador)
+        working-directory: ${{ steps.extract.outputs.root }}
+        run: bash scripts/build.sh
+
+      - name: Publicar artefatos
+        uses: actions/upload-artifact@v4
+        with:
+          name: web2exe-dist
+          path: ${{ steps.extract.outputs.root }}/dist/
+          
