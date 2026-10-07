@@ -1,0 +1,37 @@
+name: Windows cross build
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+jobs:
+  cross-build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            host: x86_64
+          - runner: ubuntu-24.04-arm
+            host: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build curl xz-utils unzip clang
+      - name: Prepare CI config
+        run: |
+          cat > build.prop <<EOF
+          APP_NAME=Web2Exe CI
+          APP_ID=com.web2exe.ci
+          APP_VERSION=1.0.0
+          APP_URL=https://example.com
+          APP_LOGO=$PWD/assets/logo.png
+          APP_ICON=$PWD/assets/icon.ico
+          INSTALL_DIR=Web2Exe CI
+          EOF
+      - name: Build x86 x64 ARM64 and installer
+        run: ./scripts/build.sh
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: web2exe-${{ matrix.host }}
+          path: dist/
