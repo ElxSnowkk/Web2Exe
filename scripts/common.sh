@@ -251,7 +251,7 @@ prepare_termux_msvcrt_toolchain() {
   local libstdc_deb="$base/libstdc++6_12.3.0-1ubuntu1~22.04.3_amd64.deb"
   local libgcc_deb="$base/libgcc-s1_12.3.0-1ubuntu1~22.04.3_amd64.deb"
   local zlib_deb="$base/zlib1g_1.2.11.dfsg-2ubuntu9.2_amd64.deb"
-  local tinfo_deb="$base/libtinfo5_6.3-2ubuntu0.1_amd64.deb"
+  local tinfo_deb="$base/libtinfo5_6.3-2ubuntu0.3_amd64.deb"
   local qbin="$base/qemu-bin"
   mkdir -p "$base"
 
@@ -268,7 +268,7 @@ prepare_termux_msvcrt_toolchain() {
     "https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-12/libstdc++6_12.3.0-1ubuntu1~22.04.3_amd64.deb|$libstdc_deb"
     "https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-12/libgcc-s1_12.3.0-1ubuntu1~22.04.3_amd64.deb|$libgcc_deb"
     "https://archive.ubuntu.com/ubuntu/pool/main/z/zlib/zlib1g_1.2.11.dfsg-2ubuntu9.2_amd64.deb|$zlib_deb"
-    "https://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb|$tinfo_deb"
+    "https://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/libtinfo5_6.3-2ubuntu0.3_amd64.deb|$tinfo_deb"
   )
   for pkgfile in "${pkgs[@]}"; do
     url="${pkgfile%%|*}"; pkgfile="${pkgfile#*|}"
