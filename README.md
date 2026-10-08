@@ -3,7 +3,7 @@
 Transforma uma URL em aplicativo Windows nativo (Win32 + Microsoft WebView2), sem Electron nem Chromium embutido.
 Compila **no próprio Android (Termux)** ou em Linux, gerando x86, x64 e ARM64 e um instalador universal.
 
-> Versão 1.2.0 — ver [CHANGELOG](CHANGELOG.md).
+> Versão 1.2.1 — ver [CHANGELOG](CHANGELOG.md).
 
 ## Instalação (Termux ou Linux)
 

@@ -94,15 +94,67 @@ prop_validate() {
 }
 
 # --------------------------------------------------------------- download ----
-fetch() {
+# try_fetch: devolve 1 em caso de falha (NÃO encerra o script; permite tentar outra URL/espelho).
+# fetch:     encerra o script com mensagem de erro se falhar.
+try_fetch() {
   local url="$1" out="$2" tmp="${2}.part"
   mkdir -p "$(dirname "$out")"; rm -f "$tmp"
-  command -v curl >/dev/null || fail "curl é necessário para downloads (pkg install curl)"
+  command -v curl >/dev/null || { warn "curl é necessário para downloads (pkg install curl)"; return 1; }
   log "Baixando $url"
-  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 20 --output "$tmp" "$url" \
-    || fail "Falha no download: $url (verifique a internet e a versão em scripts/common.sh)"
-  [[ -s "$tmp" ]] || fail "Download vazio: $url"
+  if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 20 --output "$tmp" "$url"; then
+    rm -f "$tmp"; return 1
+  fi
+  [[ -s "$tmp" ]] || { rm -f "$tmp"; warn "Download vazio: $url"; return 1; }
   mv -f "$tmp" "$out"
+}
+fetch() {
+  try_fetch "$1" "$2" || fail "Falha no download: $1 (verifique a internet e a versão em scripts/common.sh)"
+}
+
+# Baixa o tarball do LLVM-MinGW tentando várias versões de Ubuntu do release (o nome do asset varia).
+# fetch_llvm_mingw <crt> <arch> <pasta> <os-tag>...   -> define LLVM_TAR
+fetch_llvm_mingw() {
+  local crt="$1" arch="$2" dir="$3" os name; shift 3
+  LLVM_TAR=""
+  for os in "$@"; do
+    name="llvm-mingw-${LLVM_VERSION}-${crt}-ubuntu-${os}-${arch}.tar.xz"
+    if [[ -s "$dir/$name" ]] || try_fetch "$LLVM_BASE/$name" "$dir/$name"; then LLVM_TAR="$dir/$name"; return 0; fi
+  done
+  return 1
+}
+
+# Baixa um .deb do Ubuntu SEM fixar versão: lê o índice Packages.gz (jammy, -updates, -security) e
+# usa o arquivo mais novo que existir. Versões antigas somem do pool (foi o 404 do libtinfo5).
+# ubuntu_deb <pacote> <pasta>   -> define DEB_FILE
+UBUNTU_SUITE="${WEB2EXE_UBUNTU_SUITE:-jammy}"
+UBUNTU_MIRRORS=(https://archive.ubuntu.com/ubuntu https://security.ubuntu.com/ubuntu)
+ubuntu_deb() {
+  local pkg="$1" dir="$2" idxdir="$2/index" suite mirror idx cands="" ver fn f
+  mkdir -p "$idxdir"; DEB_FILE=""
+  for f in "$dir/${pkg}_"*_amd64.deb; do   # já baixado antes?
+    if [[ -s "$f" ]]; then DEB_FILE="$f"; return 0; fi
+  done
+  find "$idxdir" -name 'Packages-*.gz' -mmin +1440 -delete 2>/dev/null || true
+  for suite in "$UBUNTU_SUITE" "$UBUNTU_SUITE-updates" "$UBUNTU_SUITE-security"; do
+    idx="$idxdir/Packages-$suite.gz"
+    if [[ ! -s "$idx" ]]; then
+      for mirror in "${UBUNTU_MIRRORS[@]}"; do
+        try_fetch "$mirror/dists/$suite/main/binary-amd64/Packages.gz" "$idx" && break
+      done
+    fi
+    [[ -s "$idx" ]] || continue
+    cands+="$(gzip -dc "$idx" 2>/dev/null | awk -v p="$pkg" 'BEGIN{RS="";FS="\n"}
+      { n="";v="";fl="";
+        for(i=1;i<=NF;i++){ if($i ~ /^Package: /) n=substr($i,10); else if($i ~ /^Version: /) v=substr($i,10); else if($i ~ /^Filename: /) fl=substr($i,11) }
+        if(n==p && fl!="") print v "\t" fl }')"$'\n'
+  done
+  while IFS=$'\t' read -r ver fn; do   # do mais novo para o mais antigo
+    [[ -n "$fn" ]] || continue
+    for mirror in "${UBUNTU_MIRRORS[@]}"; do
+      if try_fetch "$mirror/$fn" "$dir/$(basename "$fn")"; then DEB_FILE="$dir/$(basename "$fn")"; return 0; fi
+    done
+  done < <(printf '%s' "$cands" | sed '/^$/d' | sort -t$'\t' -k1,1Vr)
+  return 1
 }
 
 # --------------------------------------------------------------- toolchain ----
@@ -137,20 +189,31 @@ prepare_termux_native_tools() {
 }
 
 # Contêiner/Linux comum: baixa o LLVM-MinGW pré-compilado (glibc; NÃO funciona no Termux puro).
+# PREPARE_SOFT=1 -> devolve 1 em vez de encerrar o script quando falhar (usado nos fallbacks).
 prepare_tools() {
-  mkdir -p "$CACHE/llvm-mingw"
   local arch; arch="$(uname -m)"
   case "$arch" in x86_64) arch=x86_64;; aarch64|arm64) arch=aarch64;; *) fail "Host sem LLVM-MinGW pré-compilado: $arch";; esac
-  local tar="$CACHE/llvm-mingw/llvm-mingw-${LLVM_VERSION}-${LLVM_CRT}-ubuntu-24.04-${arch}.tar.xz"
-  local dir="$CACHE/llvm-mingw/${LLVM_VERSION}-${arch}"
+  local sfx=""; [[ "$LLVM_CRT" == ucrt ]] || sfx="-$LLVM_CRT"   # msvcrt e ucrt NÃO podem dividir a mesma pasta
+  local base="$CACHE/llvm-mingw" dir="$CACHE/llvm-mingw/${LLVM_VERSION}${sfx}-${arch}"
+  mkdir -p "$base"
   if [[ ! -x "$dir/bin/clang" ]]; then
-    command -v xz >/dev/null || fail "xz é necessário (apt install xz-utils)"
-    fetch "$LLVM_BASE/llvm-mingw-${LLVM_VERSION}-${LLVM_CRT}-ubuntu-24.04-${arch}.tar.xz" "$tar"
+    if ! command -v xz >/dev/null; then
+      [[ "${PREPARE_SOFT:-}" == 1 ]] && { warn "xz ausente (apt install xz-utils)"; return 1; }
+      fail "xz é necessário (apt install xz-utils)"
+    fi
+    if ! fetch_llvm_mingw "$LLVM_CRT" "$arch" "$base" 24.04 22.04 20.04; then
+      [[ "${PREPARE_SOFT:-}" == 1 ]] && { warn "LLVM-MinGW $LLVM_CRT $LLVM_VERSION indisponível em $LLVM_BASE"; return 1; }
+      fail "Falha no download do LLVM-MinGW ($LLVM_CRT) em $LLVM_BASE (verifique a internet e WEB2EXE_LLVM_VERSION)"
+    fi
     rm -rf "$dir"; mkdir -p "$dir"
-    tar -xJf "$tar" -C "$dir" --strip-components=1
+    if ! tar -xJf "$LLVM_TAR" -C "$dir" --strip-components=1 || [[ ! -x "$dir/bin/clang" ]]; then
+      rm -rf "$dir" "$LLVM_TAR"
+      [[ "${PREPARE_SOFT:-}" == 1 ]] && { warn "Tarball do LLVM-MinGW inválido; removido"; return 1; }
+      fail "Tarball do LLVM-MinGW inválido; removido do cache. Rode de novo."
+    fi
   fi
   LLVM_ROOT="$dir"; TOOL_DIR="$dir/bin"; export LLVM_ROOT TOOL_DIR
-  ok "LLVM-MinGW $LLVM_VERSION ($arch)"
+  ok "LLVM-MinGW $LLVM_VERSION $LLVM_CRT ($arch)"
 }
 
 prepare_webview() {
@@ -230,71 +293,106 @@ CPPEOF
   return 0
 }
 
+# Torna relativos os symlinks absolutos do sysroot. Sem isso o QEMU (-L) não acha
+# /lib64/ld-linux-x86-64.so.2, que no .deb aponta para /lib/x86_64-linux-gnu/... (caminho do host).
+fix_sysroot_symlinks() {
+  local root="$1" l t rel
+  while IFS= read -r -d '' l; do
+    t="$(readlink "$l")"; [[ "$t" == /* ]] || continue
+    rel="$(realpath -m --relative-to="$(dirname "$l")" "$root$t")" || continue
+    ln -sfn "$rel" "$l"
+  done < <(find "$root" -type l -print0)
+}
+
 # Instala o LLVM-MinGW msvcrt x86_64 para Termux ARM64 sem PRoot/rootfs completo.
 # A cadeia fica: Termux ARM64 -> QEMU x86_64 -> glibc mínimo -> LLVM-MinGW x86_64.
+# Em caso de falha devolve 1 (com aviso) para o chamador poder tentar outro caminho.
 prepare_termux_msvcrt_toolchain() {
-  [[ -n "${PREFIX:-}" && -d "$PREFIX" ]] || fail "PREFIX do Termux não está disponível."
-  local qemu="$(command -v qemu-x86_64 || true)"
+  [[ -n "${PREFIX:-}" && -d "$PREFIX" ]] || { warn "PREFIX do Termux não está disponível."; return 1; }
+  local qemu; qemu="$(command -v qemu-x86_64 || true)"
   if [[ -z "$qemu" ]]; then
-    command -v pkg >/dev/null 2>&1 || fail "pkg ausente; não foi possível instalar qemu-x86-64."
+    command -v pkg >/dev/null 2>&1 || { warn "pkg ausente; não foi possível instalar qemu-user-x86-64."; return 1; }
     log "Instalando suporte QEMU x86_64..."
-    pkg install -y qemu-user-x86-64 dpkg file || fail "Falha ao instalar qemu-user-x86-64/dpkg/file."
+    pkg install -y qemu-user-x86-64 dpkg file || { warn "Falha ao instalar qemu-user-x86-64/dpkg/file."; return 1; }
     qemu="$(command -v qemu-x86_64 || true)"
   fi
-  [[ -n "$qemu" ]] || fail "qemu-x86_64 não foi encontrado após a instalação."
-
-  local base="$CACHE/llvm-mingw-msvcrt"
-  local sysroot="$base/sysroot"
-  local toolroot="$base/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-22.04-x86_64"
-  local tar="$base/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-22.04-x86_64.tar.xz"
-  local libc_deb="$base/libc6_2.35-0ubuntu3.15_amd64.deb"
-  local libstdc_deb="$base/libstdc++6_12.3.0-1ubuntu1~22.04.3_amd64.deb"
-  local libgcc_deb="$base/libgcc-s1_12.3.0-1ubuntu1~22.04.3_amd64.deb"
-  local zlib_deb="$base/zlib1g_1.2.11.dfsg-2ubuntu9.2_amd64.deb"
-  local tinfo_deb="$base/libtinfo5_6.3-2ubuntu0.3_amd64.deb"
-  local qbin="$base/qemu-bin"
-  mkdir -p "$base"
-
-  if [[ ! -d "$toolroot/bin" ]]; then
-    fetch "$LLVM_BASE/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-22.04-x86_64.tar.xz" "$tar"
-    rm -rf "$toolroot"
-    mkdir -p "$toolroot"
-    tar -xJf "$tar" -C "$toolroot" --strip-components=1
-  fi
-
-  local url pkgfile
-  declare -a pkgs=(
-    "https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.35-0ubuntu3.15_amd64.deb|$libc_deb"
-    "https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-12/libstdc++6_12.3.0-1ubuntu1~22.04.3_amd64.deb|$libstdc_deb"
-    "https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-12/libgcc-s1_12.3.0-1ubuntu1~22.04.3_amd64.deb|$libgcc_deb"
-    "https://archive.ubuntu.com/ubuntu/pool/main/z/zlib/zlib1g_1.2.11.dfsg-2ubuntu9.2_amd64.deb|$zlib_deb"
-    "https://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/libtinfo5_6.3-2ubuntu0.3_amd64.deb|$tinfo_deb"
-  )
-  for pkgfile in "${pkgs[@]}"; do
-    url="${pkgfile%%|*}"; pkgfile="${pkgfile#*|}"
-    [[ -s "$pkgfile" ]] || fetch "$url" "$pkgfile"
+  [[ -n "$qemu" ]] || { warn "qemu-x86_64 não foi encontrado após a instalação."; return 1; }
+  local t
+  for t in dpkg-deb file xz gzip realpath; do
+    command -v "$t" >/dev/null 2>&1 || { warn "'$t' ausente. Instale: pkg install dpkg file xz-utils gzip coreutils"; return 1; }
   done
 
-  if [[ ! -e "$sysroot/lib64/ld-linux-x86-64.so.2" ]]; then
+  local base="$CACHE/llvm-mingw-msvcrt"
+  local sysroot="$base/sysroot" debs="$base/debs" qbin="$base/qemu-bin"
+  mkdir -p "$base" "$debs"
+
+  # Toolchain: o tarball msvcrt é compilado em Ubuntu 22.04/20.04 (glibc 2.35/2.31 — compatível com o sysroot jammy).
+  local toolroot="" d
+  for d in "$base"/llvm-mingw-"${LLVM_VERSION}"-msvcrt-ubuntu-*-x86_64; do
+    [[ -d "$d/bin" ]] && { toolroot="$d"; break; }
+  done
+  if [[ -z "$toolroot" ]]; then
+    fetch_llvm_mingw msvcrt x86_64 "$base" 22.04 20.04 || { warn "Não achei o LLVM-MinGW msvcrt $LLVM_VERSION em $LLVM_BASE (veja WEB2EXE_LLVM_VERSION)"; return 1; }
+    toolroot="${LLVM_TAR%.tar.xz}"
+    rm -rf "$toolroot"; mkdir -p "$toolroot"
+    tar -xJf "$LLVM_TAR" -C "$toolroot" --strip-components=1 || { rm -rf "$toolroot" "$LLVM_TAR"; warn "Tarball msvcrt inválido; removido do cache."; return 1; }
+  fi
+
+  # Runtime glibc mínimo, sempre na versão que existir hoje no Ubuntu (sem fixar número de versão).
+  local p debfiles=()
+  for p in libc6 libstdc++6 libgcc-s1 zlib1g libtinfo5; do
+    if ubuntu_deb "$p" "$debs"; then
+      debfiles+=("$DEB_FILE")
+    elif [[ "$p" == libtinfo5 ]]; then
+      warn "libtinfo5 indisponível; seguindo sem ele (só é preciso se o clang reclamar de libtinfo.so.5)."
+    else
+      warn "Não consegui baixar '$p' do Ubuntu $UBUNTU_SUITE (archive.ubuntu.com / security.ubuntu.com)."; return 1
+    fi
+  done
+
+  if [[ ! -e "$sysroot/.w2e-ok" ]]; then
     rm -rf "$sysroot"; mkdir -p "$sysroot"
-    command -v dpkg-deb >/dev/null 2>&1 || fail "dpkg-deb ausente. Instale: pkg install dpkg."
-    for pkgfile in "$libc_deb" "$libstdc_deb" "$libgcc_deb" "$zlib_deb" "$tinfo_deb"; do
-      dpkg-deb -x "$pkgfile" "$sysroot" || fail "Falha ao extrair runtime mínimo: $pkgfile"
+    local f
+    for f in "${debfiles[@]}"; do
+      dpkg-deb -x "$f" "$sysroot" || { warn "Falha ao extrair runtime mínimo: $f"; rm -f "$f"; return 1; }
     done
+    fix_sysroot_symlinks "$sysroot"
+    [[ -e "$sysroot/lib64/ld-linux-x86-64.so.2" ]] || { warn "Sysroot sem ld-linux-x86-64.so.2 (extração do libc6 falhou)."; return 1; }
     mkdir -p "$sysroot/etc"
     printf '%s\n' 'nameserver 1.1.1.1' 'nameserver 8.8.8.8' > "$sysroot/etc/resolv.conf"
     printf '%s\n' 'hosts: files dns' 'passwd: files' 'group: files' > "$sysroot/etc/nsswitch.conf"
     printf '%s\n' '127.0.0.1 localhost' > "$sysroot/etc/hosts"
+    : > "$sysroot/.w2e-ok"
   fi
 
-  local clang_real=""
-  while IFS= read -r -d '' f; do
-    if file "$f" 2>/dev/null | grep -q 'ELF 64-bit.*x86-64'; then clang_real="$f"; break; fi
-  done < <(find "$toolroot/bin" -maxdepth 1 -type f -name 'clang-*' -print0 | sort -z)
-  [[ -n "$clang_real" ]] || fail "LLVM-MinGW msvcrt: executável clang x86_64 não encontrado."
+  # clang real (ELF x86_64). "clang" costuma ser symlink para clang-NN.
+  local clang_real; clang_real="$(readlink -f "$toolroot/bin/clang" 2>/dev/null || true)"
+  if [[ -z "$clang_real" ]] || ! file "$clang_real" 2>/dev/null | grep -q 'ELF 64-bit.*x86-64'; then
+    clang_real=""
+    local f
+    while IFS= read -r -d '' f; do
+      if [[ "$(basename "$f")" != clang-target-wrapper ]] && file "$f" 2>/dev/null | grep -q 'ELF 64-bit.*x86-64'; then clang_real="$f"; break; fi
+    done < <(find "$toolroot/bin" -maxdepth 1 -type f -name 'clang-*' -print0 | sort -zV)
+  fi
+  [[ -n "$clang_real" ]] || { warn "LLVM-MinGW msvcrt: executável clang x86_64 não encontrado."; return 1; }
   local clang_resource
-  clang_resource="$(find "$toolroot/lib/clang" -mindepth 1 -maxdepth 1 -type d | sort | tail -n1)"
-  [[ -d "$clang_resource" ]] || fail "LLVM-MinGW msvcrt: resource-dir não encontrado."
+  clang_resource="$(find "$toolroot/lib/clang" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n1)"
+  [[ -d "$clang_resource" ]] || { warn "LLVM-MinGW msvcrt: resource-dir não encontrado."; return 1; }
+
+  # write_wrapper <arquivo> <argv0|-> <exe> [args fixos...]: script que roda <exe> sob QEMU.
+  # argv0 importa: llvm-ar/llvm-ranlib, ld.lld/lld, llvm-windres/llvm-rc são binários "multi-call".
+  write_wrapper() {
+    local out="$1" a0="$2" exe="$3" x; shift 3
+    {
+      printf '#!%s/bin/bash\n' "$PREFIX"
+      printf 'exec env -u LD_PRELOAD %q -U LD_PRELOAD' "$qemu"
+      [[ "$a0" == - ]] || printf ' -0 %q' "$a0"
+      printf ' -L %q %q' "$sysroot" "$exe"
+      for x in "$@"; do printf ' %q' "$x"; done
+      printf ' "$@"\n'
+    } > "$out"
+    chmod 755 "$out"
+  }
 
   rm -rf "$qbin"; mkdir -p "$qbin"
   local f n real
@@ -302,32 +400,24 @@ prepare_termux_msvcrt_toolchain() {
     n="$(basename "$f")"
     real="$(readlink -f "$f" 2>/dev/null || true)"
     if [[ -n "$real" ]] && file "$real" 2>/dev/null | grep -q 'ELF 64-bit.*x86-64'; then
-      cat > "$qbin/$n" <<EOF
-#!/usr/bin/env bash
-exec env -u LD_PRELOAD "$qemu" -U LD_PRELOAD -L "$sysroot" "$real" "\$@"
-EOF
-      chmod 755 "$qbin/$n"
+      write_wrapper "$qbin/$n" "$n" "$real"
     fi
   done < <(find "$toolroot/bin" -maxdepth 1 \( -type f -o -type l \) -print0)
 
-  # Compiler ARM64-side: chama diretamente o clang x86_64 sob QEMU.
-  local arch
+  # Compiladores por alvo. clang++ PRECISA de --driver-mode=g++ (senão não liga a libc++ e o link falha).
+  local arch kind
   for arch in i686 x86_64; do
-    for kind in clang clang++; do
-      cat > "$qbin/${arch}-w64-mingw32-${kind}" <<EOF
-#!/usr/bin/env bash
-exec env -u LD_PRELOAD "$qemu" -U LD_PRELOAD -L "$sysroot" "$clang_real" --target=${arch}-w64-windows-gnu --resource-dir="$clang_resource" --sysroot="$toolroot" --config-system-dir="$toolroot/bin" "\$@"
-EOF
-      chmod 755 "$qbin/${arch}-w64-mingw32-${kind}"
-    done
+    write_wrapper "$qbin/${arch}-w64-mingw32-clang" - "$clang_real" "--target=${arch}-w64-windows-gnu" \
+      "--resource-dir=$clang_resource" "--sysroot=$toolroot" "--config-system-dir=$toolroot/bin" "-B$qbin"
+    write_wrapper "$qbin/${arch}-w64-mingw32-clang++" - "$clang_real" --driver-mode=g++ "--target=${arch}-w64-windows-gnu" \
+      "--resource-dir=$clang_resource" "--sysroot=$toolroot" "--config-system-dir=$toolroot/bin" "-B$qbin"
   done
-  for kind in clang clang++; do
-    cat > "$qbin/$kind" <<EOF
-#!/usr/bin/env bash
-exec env -u LD_PRELOAD "$qemu" -U LD_PRELOAD -L "$sysroot" "$clang_real" --resource-dir="$clang_resource" --sysroot="$toolroot" --config-system-dir="$toolroot/bin" "\$@"
-EOF
-    chmod 755 "$qbin/$kind"
-  done
+  write_wrapper "$qbin/clang"   - "$clang_real" "--resource-dir=$clang_resource" "--sysroot=$toolroot" "--config-system-dir=$toolroot/bin" "-B$qbin"
+  write_wrapper "$qbin/clang++" - "$clang_real" --driver-mode=g++ "--resource-dir=$clang_resource" "--sysroot=$toolroot" "--config-system-dir=$toolroot/bin" "-B$qbin"
+
+  # Teste de sanidade: o clang x86_64 executa mesmo sob QEMU?
+  local v
+  v="$("$qbin/x86_64-w64-mingw32-clang" --version 2>&1)" || { warn "clang x86_64 não executa sob QEMU: $v"; return 1; }
 
   export PATH="$qbin:$toolroot/bin:$PATH"
   export WEB2EXE_QEMU_SYSROOT="$sysroot" WEB2EXE_QEMU_BIN="$qbin"
@@ -359,7 +449,7 @@ select_wine_crt() {
   # com um sysroot glibc mínimo. Não extrai uma distro inteira.
   if [[ "${PREFIX:-}" == *com.termux* && -z "${WEB2EXE_WINE_NO_DOWNLOAD:-}" ]]; then
     local saved_tool="$TOOL_DIR" saved_root="${LLVM_ROOT:-}"
-    prepare_termux_msvcrt_toolchain || true
+    prepare_termux_msvcrt_toolchain || warn "Não foi possível preparar o toolchain msvcrt via QEMU (veja os avisos acima)."
     cand_cxx="$TOOL_DIR/${p}-w64-mingw32-clang++"
     if [[ -x "$cand_cxx" ]] && probe_crt "$cand_cxx"; then
       WINE_TOOL_DIR="$TOOL_DIR"; CXX="${WEB2EXE_QEMU_BIN:-$TOOL_DIR}/${p}-w64-mingw32-clang++"; CC="${WEB2EXE_QEMU_BIN:-$TOOL_DIR}/${p}-w64-mingw32-clang"; export WINE_TOOL_DIR CXX CC
@@ -372,7 +462,7 @@ select_wine_crt() {
   # Linux comum (não Termux): baixa o LLVM-MinGW msvcrt diretamente.
   if [[ "${PREFIX:-}" != *com.termux* && -z "${WEB2EXE_WINE_NO_DOWNLOAD:-}" ]]; then
     local saved_tool="$TOOL_DIR" saved_root="${LLVM_ROOT:-}"
-    LLVM_CRT=msvcrt prepare_tools || true
+    PREPARE_SOFT=1 LLVM_CRT=msvcrt prepare_tools || warn "Não foi possível obter o LLVM-MinGW msvcrt."
     cand_cxx="$TOOL_DIR/${p}-w64-mingw32-clang++"
     if [[ "$TOOL_DIR" != "$saved_tool" && -x "$cand_cxx" ]] && probe_crt "$cand_cxx"; then
       WINE_TOOL_DIR="$TOOL_DIR"; CXX="$cand_cxx"; CC="$TOOL_DIR/${p}-w64-mingw32-clang"; export WINE_TOOL_DIR CXX CC
@@ -380,7 +470,7 @@ select_wine_crt() {
     fi
     TOOL_DIR="$saved_tool"; LLVM_ROOT="$saved_root"; export TOOL_DIR LLVM_ROOT
   fi
-  fail "Modo Wine: nenhum toolchain gerou binário sem UCRT para $target (probe rc=$rc; log: $TMP_DIR/crtprobe/log.txt).
+  fail "Modo Wine: nenhum toolchain gerou binário sem UCRT para $target (probe rc=$rc; log: $TMP_DIR/crtprobe/log.txt; veja também os avisos [WARN] acima).
        Instale um LLVM-MinGW *msvcrt* e aponte WEB2EXE_MSVCRT_TOOL_DIR para a pasta bin/ dele
        (https://github.com/mstorsjo/llvm-mingw/releases → llvm-mingw-<data>-msvcrt-*)."
 }

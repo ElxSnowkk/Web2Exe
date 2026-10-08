@@ -17,10 +17,14 @@ rm -rf "$PROJECT_ROOT/build" "$PROJECT_ROOT/dist" "$TMP_DIR"
 mkdir -p "$PROJECT_ROOT/build" "$PROJECT_ROOT/dist" "$TMP_DIR"
 build_host_tools
 
-# Variante Wine no instalador único: auto = tenta e, se não houver toolchain msvcrt, segue sem ela.
-if [[ "$WINE_COMPAT" == auto ]]; then
-  if ( WINE_COMPAT=1; select_toolchain installer ) >/dev/null 2>"$TMP_DIR/wine-probe.log"; then
+# Variante Wine no instalador único. O toolchain msvcrt é testado AGORA, antes de compilar x86/x64/arm64
+# (antes, com WINE_COMPAT=1, o erro só aparecia depois de minutos de build).
+#   auto = se não houver toolchain msvcrt, segue sem a variante Wine;  1 = obrigatório (aborta aqui);  0 = não inclui.
+if [[ "$WINE_COMPAT" != 0 ]]; then
+  if ( WINE_COMPAT=1; select_toolchain installer ) 2> >(tee "$TMP_DIR/wine-probe.log" >&2); then
     WINE_COMPAT=1; ok "Modo Wine disponível: o instalador incluirá a variante Wine"
+  elif [[ "$WINE_COMPAT" == 1 ]]; then
+    fail "WINE_COMPAT=1 (obrigatório), mas não há toolchain msvcrt utilizável. Detalhes acima e em $TMP_DIR/wine-probe.log. Para compilar sem a variante Wine: WINE_COMPAT=0 no build.prop."
   else
     WINE_COMPAT=0; warn "Sem toolchain msvcrt: instalador sem variante Wine (detalhes: $TMP_DIR/wine-probe.log). Veja o README, seção Modo Wine."
   fi

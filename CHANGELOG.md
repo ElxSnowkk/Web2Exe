@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.1
+**Corrige o build do modo Wine (msvcrt) no Termux/Linux**
+- `404` em `libtinfo5_6.3-2ubuntu0.3_amd64.deb`: versões antigas somem do pool do Ubuntu, então as URLs fixas quebravam. Novo `ubuntu_deb` lê o `Packages.gz` (jammy, `-updates`, `-security`), escolhe a versão mais nova existente e tenta os espelhos `archive`/`security`. `libtinfo5` ficou opcional (aviso, não erro).
+- Falhas dentro de `prepare_termux_msvcrt_toolchain`/`prepare_tools` usavam `fail` (= `exit`) mesmo chamadas com `|| true`; agora devolvem 1 com aviso, e os fallbacks realmente rodam.
+- `build.sh` testa o toolchain msvcrt **antes** de compilar; com `WINE_COMPAT=1` e sem toolchain, aborta na hora (antes só falhava no fim, depois de x86/x64/arm64).
+- Wrappers QEMU: `clang++` agora usa `--driver-mode=g++` (sem isso o link com libc++ falhava); `argv[0]` preservado para binários multi-call (`ld.lld`, `llvm-ar`, `llvm-windres`); `-B` para o clang achar o `ld.lld` embrulhado; `clang` real resolvido por `readlink -f`.
+- Symlinks absolutos do sysroot (`/lib64/ld-linux-x86-64.so.2`) viram relativos; sem isso o QEMU `-L` não achava o loader.
+- Cache do LLVM-MinGW msvcrt não reaproveita mais a pasta do UCRT (Linux comum); tarball tenta várias tags de Ubuntu (24.04/22.04/20.04) e tarball corrompido é removido do cache.
+
 ## 1.2.0
 **Instalador único com modo Wine e assistente gráfico**
 - Corrige o erro `api-ms-win-crt-runtime-l1-1-0.dll._initialize_wide_environment ... unimplemented` em Wine antigo (Boxedwine/ExeBrowser, Wine 1.7): o instalador (x86) passa a ser ligado à `msvcrt.dll`, que existe no Windows e em qualquer Wine.
