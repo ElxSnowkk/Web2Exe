@@ -1,0 +1,16 @@
+# Configuração do Web2Exe — edite os valores abaixo e rode: web2exe build
+#
+# Nome exibido ao usuário (aceita acentos)
+APP_NAME=Meu Aplicativo
+# Identificador do .exe: letras, números, ponto, hífen ou sublinhado (sem espaços)
+APP_ID=meu-aplicativo
+APP_VERSION=1.0.0
+# Endereço HTTPS do site que vira aplicativo
+APP_URL=https://example.com
+# Imagem (PNG/JPG/BMP/WebP) e ícone .ico real; caminhos relativos partem desta pasta
+APP_LOGO=assets/logo.png
+APP_ICON=assets/icon.ico
+# Pasta de instalação em %LOCALAPPDATA%
+INSTALL_DIR=Meu Aplicativo
+# Variante Wine dentro do instalador único: auto | 1 (obrigatória) | 0 (não incluir)
+WINE_COMPAT=auto
