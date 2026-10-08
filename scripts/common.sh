@@ -291,10 +291,11 @@ prepare_termux_msvcrt_tools() {
       rm -rf "$sysroot"; mkdir -p "$sysroot"
       log "Wine/MSVCRT: extraindo sysroot Ubuntu AMD64 (isso pode levar alguns segundos no Termux)..."
       rm -rf "$sysroot"; mkdir -p "$sysroot"
-      # No Android, o proot converte hardlinks do tar em symlinks. O modo fake-root
-      # evita que permissões do tarball Ubuntu parem a extração. A extração é executada
+      # No Android, o proot converte hardlinks do tar em symlinks. Não use -0 aqui:
+      # essa opção é do PRoot e não deve chegar ao tar.
+      # A extração é executada
       # em background apenas para podermos mostrar atividade enquanto o tar trabalha.
-      ("${tar_extract[@]}" -0 -xzf "$sysroot_tar" -C "$sysroot") &
+      ("${tar_extract[@]}" -xzf "$sysroot_tar" -C "$sysroot") &
       local extract_pid=$! extract_ticks=0
       while kill -0 "$extract_pid" 2>/dev/null; do
         sleep 2
