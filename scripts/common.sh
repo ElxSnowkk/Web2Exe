@@ -226,6 +226,68 @@ CPPEOF
   return 0
 }
 
+# Termux: prepara o LLVM-MinGW msvcrt oficial, que é um binário Linux/glibc.
+# O glibc-runner permite executá-lo diretamente no kernel Android sem trocar o modo
+# principal do Web2Exe de native para proot/chroot.
+prepare_termux_msvcrt_tools() {
+  local p="$1" arch tar dir real_bin wrap_bin t
+  [[ -n "${PREFIX:-}" && -d "$PREFIX" ]] || return 1
+  command -v pkg >/dev/null 2>&1 || return 1
+
+  if ! command -v glibc-runner >/dev/null 2>&1; then
+    log "Wine/MSVCRT: instalando glibc-runner para o toolchain Linux"
+    pkg install -y glibc-repo >/dev/null 2>&1 || true
+    pkg install -y glibc-runner >/dev/null 2>&1 || true
+  fi
+  command -v glibc-runner >/dev/null 2>&1 || {
+    warn "glibc-runner não pôde ser instalado; não é possível executar o LLVM-MinGW glibc no Termux."
+    return 1
+  }
+
+  command -v xz >/dev/null 2>&1 || {
+    pkg install -y xz-utils >/dev/null 2>&1 || true
+  }
+  command -v xz >/dev/null 2>&1 || return 1
+
+  case "$(uname -m)" in
+    aarch64|arm64) arch=aarch64;;
+    x86_64) arch=x86_64;;
+    *) warn "Host Termux sem LLVM-MinGW glibc oficial para $(uname -m)"; return 1;;
+  esac
+
+  tar="$CACHE/llvm-mingw/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-24.04-${arch}.tar.xz"
+  dir="$CACHE/llvm-mingw/${LLVM_VERSION}-msvcrt-${arch}"
+  mkdir -p "$CACHE/llvm-mingw"
+
+  if [[ ! -x "$dir/bin/${p}-w64-mingw32-clang++" ]]; then
+    fetch "$LLVM_BASE/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-24.04-${arch}.tar.xz" "$tar"
+    rm -rf "$dir"; mkdir -p "$dir"
+    tar -xJf "$tar" -C "$dir" --strip-components=1
+  fi
+
+  real_bin="$dir/bin"
+  wrap_bin="$CACHE/llvm-mingw/${LLVM_VERSION}-msvcrt-${arch}-termux-bin"
+  mkdir -p "$wrap_bin"
+
+  # Cada executável glibc do toolchain recebe um wrapper Termux. O wrapper chama
+  # glibc-runner e preserva o caminho real, para que clang encontre seu resource-dir.
+  for t in "$real_bin"/*; do
+    [[ -f "$t" && -x "$t" ]] || continue
+    local name; name="$(basename "$t")"
+    cat > "$wrap_bin/$name" <<EOF
+#!${BASH:-/data/data/com.termux/files/usr/bin/bash}
+exec glibc-runner "$t" "\$@"
+EOF
+    chmod 755 "$wrap_bin/$name"
+  done
+
+  # Clang descobre lld/llvm-rc por PATH durante a compilação.
+  PATH="$wrap_bin:$real_bin:$PATH" export PATH
+  WINE_TOOL_DIR="$wrap_bin"
+  export WINE_TOOL_DIR
+  ok "LLVM-MinGW msvcrt instalado: $dir (wrappers Termux: $wrap_bin)"
+}
+
 # Define WINE_CXX/WINE_CC/WINE_FLAGS para x86|x64 (chamada por select_toolchain).
 # Ordem de tentativa: (1) o compilador atual já é msvcrt; (2) -mcrtdll=msvcrt;
 # (3) toolchain msvcrt indicado em WEB2EXE_MSVCRT_TOOL_DIR; (4) baixa o LLVM-MinGW msvcrt (só Linux comum).
@@ -245,14 +307,27 @@ select_wine_crt() {
       ok "[$target] msvcrt via toolchain $cand_dir"; return 0
     fi
   done
-  # Linux comum (não Termux): baixa o LLVM-MinGW msvcrt.
-  if [[ "${PREFIX:-}" != *com.termux* && -z "${WEB2EXE_WINE_NO_DOWNLOAD:-}" ]]; then
+  # Linux comum: baixa o LLVM-MinGW msvcrt.
+  # Termux: instala o runner glibc e usa o mesmo toolchain oficial dentro do ambiente
+  # glibc do Android, mantendo o restante do build nativo no Termux.
+  if [[ -z "${WEB2EXE_WINE_NO_DOWNLOAD:-}" ]]; then
     local saved_tool="$TOOL_DIR" saved_root="${LLVM_ROOT:-}"
-    LLVM_CRT=msvcrt prepare_tools || true
-    cand_cxx="$TOOL_DIR/${p}-w64-mingw32-clang++"
-    if [[ "$TOOL_DIR" != "$saved_tool" && -x "$cand_cxx" ]] && probe_crt "$cand_cxx"; then
-      WINE_TOOL_DIR="$TOOL_DIR"; CXX="$cand_cxx"; CC="$TOOL_DIR/${p}-w64-mingw32-clang"; export WINE_TOOL_DIR CXX CC
-      ok "[$target] msvcrt via LLVM-MinGW msvcrt baixado"; return 0
+    if [[ "${PREFIX:-}" == *com.termux* ]]; then
+      prepare_termux_msvcrt_tools "$p" || true
+      cand_cxx="${WINE_TOOL_DIR:-}/$p-w64-mingw32-clang++"
+      if [[ -x "$cand_cxx" ]] && probe_crt "$cand_cxx"; then
+        TOOL_DIR="$WINE_TOOL_DIR"
+        CXX="$cand_cxx"; CC="$WINE_TOOL_DIR/$p-w64-mingw32-clang"
+        export TOOL_DIR WINE_TOOL_DIR CXX CC
+        ok "[$target] msvcrt via LLVM-MinGW msvcrt instalado no Termux"; return 0
+      fi
+    else
+      LLVM_CRT=msvcrt prepare_tools || true
+      cand_cxx="$TOOL_DIR/${p}-w64-mingw32-clang++"
+      if [[ "$TOOL_DIR" != "$saved_tool" && -x "$cand_cxx" ]] && probe_crt "$cand_cxx"; then
+        WINE_TOOL_DIR="$TOOL_DIR"; CXX="$cand_cxx"; CC="$TOOL_DIR/${p}-w64-mingw32-clang"; export WINE_TOOL_DIR CXX CC
+        ok "[$target] msvcrt via LLVM-MinGW msvcrt baixado"; return 0
+      fi
     fi
     TOOL_DIR="$saved_tool"; LLVM_ROOT="$saved_root"; export TOOL_DIR LLVM_ROOT
   fi
