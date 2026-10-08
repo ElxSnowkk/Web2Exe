@@ -260,6 +260,17 @@ prepare_termux_msvcrt_tools() {
 
   command -v xz >/dev/null 2>&1 || { pkg install -y xz-utils || return 1; }
   command -v tar >/dev/null 2>&1 || return 1
+  # Android não permite criar hardlinks durante a extração de tarballs.
+  # O proot --link2symlink converte esses hardlinks em symlinks, preservando
+  # a estrutura necessária do sysroot/toolchain sem exigir root.
+  local tar_extract=(tar)
+  if [[ "$host_arch" == "aarch64" || "$host_arch" == "arm64" ]]; then
+    if ! command -v proot >/dev/null 2>&1; then
+      log "Wine/MSVCRT: instalando proot para extrair tarballs com hardlinks no Android..."
+      pkg install -y proot || return 1
+    fi
+    tar_extract=(proot --link2symlink tar)
+  fi
 
   # O asset existente no release 20260922 é ubuntu-22.04-x86_64.tar.xz.
   # Não existe o caminho ubuntu-24.04-aarch64 usado pela versão anterior.
@@ -275,7 +286,7 @@ prepare_termux_msvcrt_tools() {
       log "Wine/MSVCRT: baixando sysroot Ubuntu 22.04 AMD64 para QEMU..."
       fetch "https://cdimages.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-amd64.tar.gz" "$sysroot_tar"
       rm -rf "$sysroot"; mkdir -p "$sysroot"
-      tar -xzf "$sysroot_tar" -C "$sysroot" || {
+      "${tar_extract[@]}" -xzf "$sysroot_tar" -C "$sysroot" || {
         rm -rf "$sysroot"
         fail "Falha ao extrair o sysroot Ubuntu AMD64: $sysroot_tar"
       }
@@ -288,7 +299,7 @@ prepare_termux_msvcrt_tools() {
   if [[ ! -x "$dir/bin/${p}-w64-mingw32-clang++" ]]; then
     fetch "$LLVM_BASE/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-22.04-x86_64.tar.xz" "$tar"
     rm -rf "$dir"; mkdir -p "$dir"
-    tar -xJf "$tar" -C "$dir" --strip-components=1 || {
+    "${tar_extract[@]}" -xJf "$tar" -C "$dir" --strip-components=1 || {
       rm -rf "$dir"
       fail "Falha ao extrair o LLVM-MinGW MSVCRT: $tar"
     }
