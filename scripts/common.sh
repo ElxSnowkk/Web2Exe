@@ -230,7 +230,7 @@ CPPEOF
 # O glibc-runner permite executá-lo diretamente no kernel Android sem trocar o modo
 # principal do Web2Exe de native para proot/chroot.
 prepare_termux_msvcrt_tools() {
-  local p="$1" host_arch target_arch tar dir real_bin wrap_bin t name qemu sysroot sysroot_tar
+  local p="$1" host_arch target_arch tar dir real_bin wrap_bin t name qemu sysroot sysroot_tar msvcrt_distro msvcrt_arch
   [[ -n "${PREFIX:-}" && -d "$PREFIX" ]] || return 1
   command -v pkg >/dev/null 2>&1 || return 1
 
@@ -272,9 +272,12 @@ prepare_termux_msvcrt_tools() {
     tar_extract=(proot --link2symlink tar)
   fi
 
-  # O asset existente no release 20260922 é ubuntu-22.04-x86_64.tar.xz.
-  # Não existe o caminho ubuntu-24.04-aarch64 usado pela versão anterior.
-  tar="$CACHE/llvm-mingw/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-22.04-x86_64.tar.xz"
+  # O MSVCRT Linux prebuilt oficial usado aqui é o cross-toolchain x86_64
+  # para Ubuntu 22.04. NÃO derive este asset de uname -m: no Termux ARM64
+  # o host é aarch64, mas o asset MSVCRT não é publicado nessa combinação.
+  msvcrt_distro=ubuntu-22.04
+  msvcrt_arch=x86_64
+  tar="$CACHE/llvm-mingw/llvm-mingw-${LLVM_VERSION}-msvcrt-${msvcrt_distro}-${msvcrt_arch}.tar.xz"
   dir="$CACHE/llvm-mingw/${LLVM_VERSION}-msvcrt-${target_arch}"
   mkdir -p "$CACHE/llvm-mingw"
 
@@ -286,10 +289,27 @@ prepare_termux_msvcrt_tools() {
       log "Wine/MSVCRT: baixando sysroot Ubuntu 22.04 AMD64 para QEMU..."
       fetch "https://cdimages.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-amd64.tar.gz" "$sysroot_tar"
       rm -rf "$sysroot"; mkdir -p "$sysroot"
-      "${tar_extract[@]}" -xzf "$sysroot_tar" -C "$sysroot" || {
+      log "Wine/MSVCRT: extraindo sysroot Ubuntu AMD64 (isso pode levar alguns segundos no Termux)..."
+      rm -rf "$sysroot"; mkdir -p "$sysroot"
+      # No Android, o proot converte hardlinks do tar em symlinks. O modo fake-root
+      # evita que permissões do tarball Ubuntu parem a extração. A extração é executada
+      # em background apenas para podermos mostrar atividade enquanto o tar trabalha.
+      ("${tar_extract[@]}" -0 -xzf "$sysroot_tar" -C "$sysroot") &
+      local extract_pid=$! extract_ticks=0
+      while kill -0 "$extract_pid" 2>/dev/null; do
+        sleep 2
+        extract_ticks=$((extract_ticks + 1))
+        if (( extract_ticks % 5 == 0 )); then
+          local nfiles=0
+          nfiles="$(find "$sysroot" -type f 2>/dev/null | wc -l | tr -d ' ')"
+          log "Wine/MSVCRT: extração do sysroot ainda em andamento (${nfiles:-0} arquivos)..."
+        fi
+      done
+      wait "$extract_pid" || {
         rm -rf "$sysroot"
         fail "Falha ao extrair o sysroot Ubuntu AMD64: $sysroot_tar"
       }
+      log "Wine/MSVCRT: sysroot Ubuntu AMD64 extraído."
     fi
     [[ -f "$sysroot/lib/x86_64-linux-gnu/libc.so.6" && -f "$sysroot/lib64/ld-linux-x86-64.so.2" ]] || return 1
   else
@@ -297,7 +317,7 @@ prepare_termux_msvcrt_tools() {
   fi
 
   if [[ ! -x "$dir/bin/${p}-w64-mingw32-clang++" ]]; then
-    fetch "$LLVM_BASE/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-22.04-x86_64.tar.xz" "$tar"
+    fetch "$LLVM_BASE/llvm-mingw-${LLVM_VERSION}-msvcrt-${msvcrt_distro}-${msvcrt_arch}.tar.xz" "$tar"
     rm -rf "$dir"; mkdir -p "$dir"
     "${tar_extract[@]}" -xJf "$tar" -C "$dir" --strip-components=1 || {
       rm -rf "$dir"
