@@ -230,41 +230,63 @@ CPPEOF
 # O glibc-runner permite executá-lo diretamente no kernel Android sem trocar o modo
 # principal do Web2Exe de native para proot/chroot.
 prepare_termux_msvcrt_tools() {
-  local p="$1" arch tar dir real_bin wrap_bin t name
+  local p="$1" host_arch target_arch tar dir real_bin wrap_bin t name qemu sysroot sysroot_tar
   [[ -n "${PREFIX:-}" && -d "$PREFIX" ]] || return 1
   command -v pkg >/dev/null 2>&1 || return 1
 
-  # O LLVM-MinGW MSVCRT distribuído oficialmente é um binário Linux/glibc.
-  # No Termux, instale o runtime glibc uma única vez e use glibc-runner para
-  # executar o toolchain, sem alterar o modo nativo do Web2Exe.
-  if ! command -v glibc-runner >/dev/null 2>&1; then
-    log "Wine/MSVCRT: instalando suporte glibc do Termux..."
-    pkg update -y || return 1
-    pkg install -y glibc-repo || return 1
-    pkg update -y || return 1
-    pkg install -y glibc glibc-runner || return 1
-  elif [[ ! -d "$PREFIX/glibc" ]]; then
-    log "Wine/MSVCRT: instalando runtime glibc do Termux..."
-    pkg install -y glibc || return 1
-  fi
-  command -v glibc-runner >/dev/null 2>&1 || return 1
-  [[ -d "$PREFIX/glibc" ]] || return 1
-
-  command -v xz >/dev/null 2>&1 || pkg install -y xz-utils || return 1
-  command -v tar >/dev/null 2>&1 || return 1
-
-  case "$(uname -m)" in
-    aarch64|arm64) arch=aarch64;;
-    x86_64) arch=x86_64;;
-    *) warn "Host Termux sem LLVM-MinGW glibc oficial para $(uname -m)"; return 1;;
+  # Os releases oficiais atuais do LLVM-MinGW publicam o MSVCRT Linux
+  # somente como cross-toolchain x86_64 para Ubuntu 22.04. Em Termux ARM64,
+  # o binário x86_64 precisa de QEMU user-mode; glibc-runner sozinho não pode
+  # executar um ELF de arquitetura diferente.
+  host_arch="$(uname -m)"
+  case "$host_arch" in
+    x86_64) target_arch=x86_64;;
+    aarch64|arm64)
+      target_arch=x86_64
+      qemu="$(command -v qemu-x86_64 || true)"
+      if [[ -z "$qemu" ]]; then
+        log "Wine/MSVCRT: instalando QEMU user-mode x86_64 para Termux ARM64..."
+        pkg update -y || return 1
+        pkg install -y qemu-user-x86-64 || return 1
+        qemu="$(command -v qemu-x86_64 || true)"
+      fi
+      [[ -x "$qemu" ]] || return 1
+      ;;
+    *)
+      warn "Host Termux sem suporte ao LLVM-MinGW MSVCRT prebuilt: $host_arch"
+      return 1
+      ;;
   esac
 
-  tar="$CACHE/llvm-mingw/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-24.04-${arch}.tar.xz"
-  dir="$CACHE/llvm-mingw/${LLVM_VERSION}-msvcrt-${arch}"
+  command -v xz >/dev/null 2>&1 || { pkg install -y xz-utils || return 1; }
+  command -v tar >/dev/null 2>&1 || return 1
+
+  # O asset existente no release 20260922 é ubuntu-22.04-x86_64.tar.xz.
+  # Não existe o caminho ubuntu-24.04-aarch64 usado pela versão anterior.
+  tar="$CACHE/llvm-mingw/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-22.04-x86_64.tar.xz"
+  dir="$CACHE/llvm-mingw/${LLVM_VERSION}-msvcrt-${target_arch}"
   mkdir -p "$CACHE/llvm-mingw"
 
+  if [[ "$host_arch" == "aarch64" || "$host_arch" == "arm64" ]]; then
+    # Sysroot AMD64 mínimo para o QEMU executar os binários glibc do LLVM-MinGW.
+    sysroot="$CACHE/llvm-mingw/ubuntu-22.04-amd64-sysroot"
+    sysroot_tar="$CACHE/llvm-mingw/ubuntu-base-22.04.5-base-amd64.tar.gz"
+    if [[ ! -f "$sysroot/lib/x86_64-linux-gnu/libc.so.6" || ! -f "$sysroot/lib64/ld-linux-x86-64.so.2" ]]; then
+      log "Wine/MSVCRT: baixando sysroot Ubuntu 22.04 AMD64 para QEMU..."
+      fetch "https://cdimages.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-amd64.tar.gz" "$sysroot_tar"
+      rm -rf "$sysroot"; mkdir -p "$sysroot"
+      tar -xzf "$sysroot_tar" -C "$sysroot" || {
+        rm -rf "$sysroot"
+        fail "Falha ao extrair o sysroot Ubuntu AMD64: $sysroot_tar"
+      }
+    fi
+    [[ -f "$sysroot/lib/x86_64-linux-gnu/libc.so.6" && -f "$sysroot/lib64/ld-linux-x86-64.so.2" ]] || return 1
+  else
+    sysroot=""
+  fi
+
   if [[ ! -x "$dir/bin/${p}-w64-mingw32-clang++" ]]; then
-    fetch "$LLVM_BASE/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-24.04-${arch}.tar.xz" "$tar"
+    fetch "$LLVM_BASE/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-22.04-x86_64.tar.xz" "$tar"
     rm -rf "$dir"; mkdir -p "$dir"
     tar -xJf "$tar" -C "$dir" --strip-components=1 || {
       rm -rf "$dir"
@@ -274,18 +296,25 @@ prepare_termux_msvcrt_tools() {
   [[ -x "$dir/bin/${p}-w64-mingw32-clang++" ]] || return 1
 
   real_bin="$dir/bin"
-  wrap_bin="$CACHE/llvm-mingw/${LLVM_VERSION}-msvcrt-${arch}-termux-bin"
+  wrap_bin="$CACHE/llvm-mingw/${LLVM_VERSION}-msvcrt-${target_arch}-termux-bin"
   rm -rf "$wrap_bin"; mkdir -p "$wrap_bin"
 
-  # O wrapper mantém o caminho real do executável no argv[0], permitindo que
-  # o Clang encontre seus cfg/resource files dentro do toolchain extraído.
+  # Em ARM64, cada executável x86_64 é relançado pelo qemu-x86_64 com o
+  # sysroot Ubuntu. Isso também cobre clang/clang++, lld, llvm-rc e objdump.
   for t in "$real_bin"/*; do
     [[ -f "$t" && -x "$t" ]] || continue
     name="$(basename "$t")"
-    cat > "$wrap_bin/$name" <<EOF
+    if [[ -n "$qemu" ]]; then
+      cat > "$wrap_bin/$name" <<EOF
+#!${BASH:-/data/data/com.termux/files/usr/bin/bash}
+exec env -u LD_PRELOAD "$qemu" -L "$sysroot" "$t" "\$@"
+EOF
+    else
+      cat > "$wrap_bin/$name" <<EOF
 #!${BASH:-/data/data/com.termux/files/usr/bin/bash}
 exec glibc-runner "$t" "\$@"
 EOF
+    fi
     chmod 755 "$wrap_bin/$name"
   done
 
@@ -293,7 +322,11 @@ EOF
   export PATH
   WINE_TOOL_DIR="$wrap_bin"
   export WINE_TOOL_DIR
-  ok "LLVM-MinGW msvcrt instalado: $dir (wrappers Termux: $wrap_bin)"
+  if [[ -n "$qemu" ]]; then
+    ok "LLVM-MinGW msvcrt instalado: $dir (QEMU x86_64 + sysroot Ubuntu 22.04)"
+  else
+    ok "LLVM-MinGW msvcrt instalado: $dir (glibc-runner)"
+  fi
 }
 
 # Define WINE_CXX/WINE_CC/WINE_FLAGS para x86|x64 (chamada por select_toolchain).
