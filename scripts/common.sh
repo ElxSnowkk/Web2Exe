@@ -220,145 +220,120 @@ probe_crt() {
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR a, int) { std::wstring s = a ? a : L""; std::error_code e; return (int)(s.size() + std::filesystem::exists(L"C:\\", e)); }
 CPPEOF
   rm -f "$d/p.exe"
-  "$cxx" "$@" -std=c++20 -O1 -static -fuse-ld=lld -DUNICODE -D_UNICODE -municode -mwindows "$d/p.cpp" -o "$d/p.exe" >"$d/log.txt" 2>&1 || return 2
+  if [[ -n "${WEB2EXE_QEMU_BIN:-}" && "$cxx" == "$TOOL_DIR/"* ]]; then
+    PATH="$WEB2EXE_QEMU_BIN:$PATH" "$cxx" "$@" -std=c++20 -O1 -static -fuse-ld=lld -DUNICODE -D_UNICODE -municode -mwindows "$d/p.cpp" -o "$d/p.exe" >"$d/log.txt" 2>&1 || return 2
+  else
+    "$cxx" "$@" -std=c++20 -O1 -static -fuse-ld=lld -DUNICODE -D_UNICODE -municode -mwindows "$d/p.cpp" -o "$d/p.exe" >"$d/log.txt" 2>&1 || return 2
+  fi
   [[ -f "$d/p.exe" ]] || return 2
   pe_uses_ucrt "$d/p.exe" && return 1
   return 0
 }
 
-# Termux: prepara o LLVM-MinGW msvcrt oficial, que é um binário Linux/glibc.
-# O glibc-runner permite executá-lo diretamente no kernel Android sem trocar o modo
-# principal do Web2Exe de native para proot/chroot.
-prepare_termux_msvcrt_tools() {
-  local p="$1" host_arch target_arch tar dir real_bin wrap_bin t name qemu sysroot sysroot_tar msvcrt_distro msvcrt_arch
-  [[ -n "${PREFIX:-}" && -d "$PREFIX" ]] || return 1
-  command -v pkg >/dev/null 2>&1 || return 1
+# Instala o LLVM-MinGW msvcrt x86_64 para Termux ARM64 sem PRoot/rootfs completo.
+# A cadeia fica: Termux ARM64 -> QEMU x86_64 -> glibc mínimo -> LLVM-MinGW x86_64.
+prepare_termux_msvcrt_toolchain() {
+  [[ -n "${PREFIX:-}" && -d "$PREFIX" ]] || fail "PREFIX do Termux não está disponível."
+  local qemu="$(command -v qemu-x86_64 || true)"
+  if [[ -z "$qemu" ]]; then
+    command -v pkg >/dev/null 2>&1 || fail "pkg ausente; não foi possível instalar qemu-x86-64."
+    log "Instalando suporte QEMU x86_64..."
+    pkg install -y qemu-user-x86-64 dpkg file || fail "Falha ao instalar qemu-user-x86-64/dpkg/file."
+    qemu="$(command -v qemu-x86_64 || true)"
+  fi
+  [[ -n "$qemu" ]] || fail "qemu-x86_64 não foi encontrado após a instalação."
 
-  # Os releases oficiais atuais do LLVM-MinGW publicam o MSVCRT Linux
-  # somente como cross-toolchain x86_64 para Ubuntu 22.04. Em Termux ARM64,
-  # o binário x86_64 precisa de QEMU user-mode; glibc-runner sozinho não pode
-  # executar um ELF de arquitetura diferente.
-  host_arch="$(uname -m)"
-  case "$host_arch" in
-    x86_64) target_arch=x86_64;;
-    aarch64|arm64)
-      target_arch=x86_64
-      qemu="$(command -v qemu-x86_64 || true)"
-      if [[ -z "$qemu" ]]; then
-        log "Wine/MSVCRT: instalando QEMU user-mode x86_64 para Termux ARM64..."
-        pkg update -y || return 1
-        pkg install -y qemu-user-x86-64 || return 1
-        qemu="$(command -v qemu-x86_64 || true)"
-      fi
-      [[ -x "$qemu" ]] || return 1
-      ;;
-    *)
-      warn "Host Termux sem suporte ao LLVM-MinGW MSVCRT prebuilt: $host_arch"
-      return 1
-      ;;
-  esac
+  local base="$CACHE/llvm-mingw-msvcrt"
+  local sysroot="$base/sysroot"
+  local toolroot="$base/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-22.04-x86_64"
+  local tar="$base/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-22.04-x86_64.tar.xz"
+  local libc_deb="$base/libc6_2.35-0ubuntu3.15_amd64.deb"
+  local libstdc_deb="$base/libstdc++6_12.3.0-1ubuntu1~22.04.3_amd64.deb"
+  local libgcc_deb="$base/libgcc-s1_12.3.0-1ubuntu1~22.04.3_amd64.deb"
+  local zlib_deb="$base/zlib1g_1.2.11.dfsg-2ubuntu9.2_amd64.deb"
+  local tinfo_deb="$base/libtinfo5_6.3-2ubuntu0.1_amd64.deb"
+  local qbin="$base/qemu-bin"
+  mkdir -p "$base"
 
-  command -v xz >/dev/null 2>&1 || { pkg install -y xz-utils || return 1; }
-  command -v tar >/dev/null 2>&1 || return 1
-  # Android não permite criar hardlinks durante a extração de tarballs.
-  # O proot --link2symlink converte esses hardlinks em symlinks, preservando
-  # a estrutura necessária do sysroot/toolchain sem exigir root.
-  local tar_extract=(tar)
-  if [[ "$host_arch" == "aarch64" || "$host_arch" == "arm64" ]]; then
-    if ! command -v proot >/dev/null 2>&1; then
-      log "Wine/MSVCRT: instalando proot para extrair tarballs com hardlinks no Android..."
-      pkg install -y proot || return 1
-    fi
-    tar_extract=(proot --link2symlink tar)
+  if [[ ! -d "$toolroot/bin" ]]; then
+    fetch "$LLVM_BASE/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-22.04-x86_64.tar.xz" "$tar"
+    rm -rf "$toolroot"
+    mkdir -p "$toolroot"
+    tar -xJf "$tar" -C "$toolroot" --strip-components=1
   fi
 
-  # O MSVCRT Linux prebuilt oficial usado aqui é o cross-toolchain x86_64
-  # para Ubuntu 22.04. NÃO derive este asset de uname -m: no Termux ARM64
-  # o host é aarch64, mas o asset MSVCRT não é publicado nessa combinação.
-  msvcrt_distro=ubuntu-22.04
-  msvcrt_arch=x86_64
-  tar="$CACHE/llvm-mingw/llvm-mingw-${LLVM_VERSION}-msvcrt-${msvcrt_distro}-${msvcrt_arch}.tar.xz"
-  dir="$CACHE/llvm-mingw/${LLVM_VERSION}-msvcrt-${target_arch}"
-  mkdir -p "$CACHE/llvm-mingw"
-
-  if [[ "$host_arch" == "aarch64" || "$host_arch" == "arm64" ]]; then
-    # Sysroot AMD64 mínimo para o QEMU executar os binários glibc do LLVM-MinGW.
-    sysroot="$CACHE/llvm-mingw/ubuntu-22.04-amd64-sysroot"
-    sysroot_tar="$CACHE/llvm-mingw/ubuntu-base-22.04.5-base-amd64.tar.gz"
-    if [[ ! -f "$sysroot/lib/x86_64-linux-gnu/libc.so.6" || ! -f "$sysroot/lib64/ld-linux-x86-64.so.2" ]]; then
-      log "Wine/MSVCRT: baixando sysroot Ubuntu 22.04 AMD64 para QEMU..."
-      fetch "https://cdimages.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-amd64.tar.gz" "$sysroot_tar"
-      rm -rf "$sysroot"; mkdir -p "$sysroot"
-      log "Wine/MSVCRT: extraindo sysroot Ubuntu AMD64 (isso pode levar alguns segundos no Termux)..."
-      rm -rf "$sysroot"; mkdir -p "$sysroot"
-      # No Android, o proot converte hardlinks do tar em symlinks. Não use -0 aqui:
-      # essa opção é do PRoot e não deve chegar ao tar.
-      # A extração é executada
-      # em background apenas para podermos mostrar atividade enquanto o tar trabalha.
-      ("${tar_extract[@]}" -xzf "$sysroot_tar" -C "$sysroot") &
-      local extract_pid=$! extract_ticks=0
-      while kill -0 "$extract_pid" 2>/dev/null; do
-        sleep 2
-        extract_ticks=$((extract_ticks + 1))
-        if (( extract_ticks % 5 == 0 )); then
-          local nfiles=0
-          nfiles="$(find "$sysroot" -type f 2>/dev/null | wc -l | tr -d ' ')"
-          log "Wine/MSVCRT: extração do sysroot ainda em andamento (${nfiles:-0} arquivos)..."
-        fi
-      done
-      wait "$extract_pid" || {
-        rm -rf "$sysroot"
-        fail "Falha ao extrair o sysroot Ubuntu AMD64: $sysroot_tar"
-      }
-      log "Wine/MSVCRT: sysroot Ubuntu AMD64 extraído."
-    fi
-    [[ -f "$sysroot/lib/x86_64-linux-gnu/libc.so.6" && -f "$sysroot/lib64/ld-linux-x86-64.so.2" ]] || return 1
-  else
-    sysroot=""
-  fi
-
-  if [[ ! -x "$dir/bin/${p}-w64-mingw32-clang++" ]]; then
-    fetch "$LLVM_BASE/llvm-mingw-${LLVM_VERSION}-msvcrt-${msvcrt_distro}-${msvcrt_arch}.tar.xz" "$tar"
-    rm -rf "$dir"; mkdir -p "$dir"
-    "${tar_extract[@]}" -xJf "$tar" -C "$dir" --strip-components=1 || {
-      rm -rf "$dir"
-      fail "Falha ao extrair o LLVM-MinGW MSVCRT: $tar"
-    }
-  fi
-  [[ -x "$dir/bin/${p}-w64-mingw32-clang++" ]] || return 1
-
-  real_bin="$dir/bin"
-  wrap_bin="$CACHE/llvm-mingw/${LLVM_VERSION}-msvcrt-${target_arch}-termux-bin"
-  rm -rf "$wrap_bin"; mkdir -p "$wrap_bin"
-
-  # Em ARM64, cada executável x86_64 é relançado pelo qemu-x86_64 com o
-  # sysroot Ubuntu. Isso também cobre clang/clang++, lld, llvm-rc e objdump.
-  for t in "$real_bin"/*; do
-    [[ -f "$t" && -x "$t" ]] || continue
-    name="$(basename "$t")"
-    if [[ -n "$qemu" ]]; then
-      cat > "$wrap_bin/$name" <<EOF
-#!${BASH:-/data/data/com.termux/files/usr/bin/bash}
-exec env -u LD_PRELOAD "$qemu" -L "$sysroot" "$t" "\$@"
-EOF
-    else
-      cat > "$wrap_bin/$name" <<EOF
-#!${BASH:-/data/data/com.termux/files/usr/bin/bash}
-exec glibc-runner "$t" "\$@"
-EOF
-    fi
-    chmod 755 "$wrap_bin/$name"
+  local url pkgfile
+  declare -a pkgs=(
+    "https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.35-0ubuntu3.15_amd64.deb|$libc_deb"
+    "https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-12/libstdc++6_12.3.0-1ubuntu1~22.04.3_amd64.deb|$libstdc_deb"
+    "https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-12/libgcc-s1_12.3.0-1ubuntu1~22.04.3_amd64.deb|$libgcc_deb"
+    "https://archive.ubuntu.com/ubuntu/pool/main/z/zlib/zlib1g_1.2.11.dfsg-2ubuntu9.2_amd64.deb|$zlib_deb"
+    "https://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb|$tinfo_deb"
+  )
+  for pkgfile in "${pkgs[@]}"; do
+    url="${pkgfile%%|*}"; pkgfile="${pkgfile#*|}"
+    [[ -s "$pkgfile" ]] || fetch "$url" "$pkgfile"
   done
 
-  PATH="$wrap_bin:$real_bin:$PATH"
-  export PATH
-  WINE_TOOL_DIR="$wrap_bin"
-  export WINE_TOOL_DIR
-  if [[ -n "$qemu" ]]; then
-    ok "LLVM-MinGW msvcrt instalado: $dir (QEMU x86_64 + sysroot Ubuntu 22.04)"
-  else
-    ok "LLVM-MinGW msvcrt instalado: $dir (glibc-runner)"
+  if [[ ! -e "$sysroot/lib64/ld-linux-x86-64.so.2" ]]; then
+    rm -rf "$sysroot"; mkdir -p "$sysroot"
+    command -v dpkg-deb >/dev/null 2>&1 || fail "dpkg-deb ausente. Instale: pkg install dpkg."
+    for pkgfile in "$libc_deb" "$libstdc_deb" "$libgcc_deb" "$zlib_deb" "$tinfo_deb"; do
+      dpkg-deb -x "$pkgfile" "$sysroot" || fail "Falha ao extrair runtime mínimo: $pkgfile"
+    done
+    mkdir -p "$sysroot/etc"
+    printf '%s\n' 'nameserver 1.1.1.1' 'nameserver 8.8.8.8' > "$sysroot/etc/resolv.conf"
+    printf '%s\n' 'hosts: files dns' 'passwd: files' 'group: files' > "$sysroot/etc/nsswitch.conf"
+    printf '%s\n' '127.0.0.1 localhost' > "$sysroot/etc/hosts"
   fi
+
+  local clang_real=""
+  while IFS= read -r -d '' f; do
+    if file "$f" 2>/dev/null | grep -q 'ELF 64-bit.*x86-64'; then clang_real="$f"; break; fi
+  done < <(find "$toolroot/bin" -maxdepth 1 -type f -name 'clang-*' -print0 | sort -z)
+  [[ -n "$clang_real" ]] || fail "LLVM-MinGW msvcrt: executável clang x86_64 não encontrado."
+  local clang_resource
+  clang_resource="$(find "$toolroot/lib/clang" -mindepth 1 -maxdepth 1 -type d | sort | tail -n1)"
+  [[ -d "$clang_resource" ]] || fail "LLVM-MinGW msvcrt: resource-dir não encontrado."
+
+  rm -rf "$qbin"; mkdir -p "$qbin"
+  local f n real
+  while IFS= read -r -d '' f; do
+    n="$(basename "$f")"
+    real="$(readlink -f "$f" 2>/dev/null || true)"
+    if [[ -n "$real" ]] && file "$real" 2>/dev/null | grep -q 'ELF 64-bit.*x86-64'; then
+      cat > "$qbin/$n" <<EOF
+#!/usr/bin/env bash
+exec env -u LD_PRELOAD "$qemu" -U LD_PRELOAD -L "$sysroot" "$real" "\$@"
+EOF
+      chmod 755 "$qbin/$n"
+    fi
+  done < <(find "$toolroot/bin" -maxdepth 1 \( -type f -o -type l \) -print0)
+
+  # Compiler ARM64-side: chama diretamente o clang x86_64 sob QEMU.
+  local arch
+  for arch in i686 x86_64; do
+    for kind in clang clang++; do
+      cat > "$qbin/${arch}-w64-mingw32-${kind}" <<EOF
+#!/usr/bin/env bash
+exec env -u LD_PRELOAD "$qemu" -U LD_PRELOAD -L "$sysroot" "$clang_real" --target=${arch}-w64-windows-gnu --resource-dir="$clang_resource" --sysroot="$toolroot" --config-system-dir="$toolroot/bin" "\$@"
+EOF
+      chmod 755 "$qbin/${arch}-w64-mingw32-${kind}"
+    done
+  done
+  for kind in clang clang++; do
+    cat > "$qbin/$kind" <<EOF
+#!/usr/bin/env bash
+exec env -u LD_PRELOAD "$qemu" -U LD_PRELOAD -L "$sysroot" "$clang_real" --resource-dir="$clang_resource" --sysroot="$toolroot" --config-system-dir="$toolroot/bin" "\$@"
+EOF
+    chmod 755 "$qbin/$kind"
+  done
+
+  export PATH="$qbin:$toolroot/bin:$PATH"
+  export WEB2EXE_QEMU_SYSROOT="$sysroot" WEB2EXE_QEMU_BIN="$qbin"
+  TOOL_DIR="$qbin"; LLVM_ROOT="$toolroot"
+  export TOOL_DIR LLVM_ROOT
+  ok "LLVM-MinGW msvcrt x86_64 + glibc mínimo pronto (sem Ubuntu Base/PRoot)"
 }
 
 # Define WINE_CXX/WINE_CC/WINE_FLAGS para x86|x64 (chamada por select_toolchain).
@@ -380,27 +355,28 @@ select_wine_crt() {
       ok "[$target] msvcrt via toolchain $cand_dir"; return 0
     fi
   done
-  # Linux comum: baixa o LLVM-MinGW msvcrt.
-  # Termux: instala o runner glibc e usa o mesmo toolchain oficial dentro do ambiente
-  # glibc do Android, mantendo o restante do build nativo no Termux.
-  if [[ -z "${WEB2EXE_WINE_NO_DOWNLOAD:-}" ]]; then
+  # Termux ARM64: usa o LLVM-MinGW Linux x86_64 via QEMU user-mode,
+  # com um sysroot glibc mínimo. Não extrai uma distro inteira.
+  if [[ "${PREFIX:-}" == *com.termux* && -z "${WEB2EXE_WINE_NO_DOWNLOAD:-}" ]]; then
     local saved_tool="$TOOL_DIR" saved_root="${LLVM_ROOT:-}"
-    if [[ "${PREFIX:-}" == *com.termux* ]]; then
-      prepare_termux_msvcrt_tools "$p" || true
-      cand_cxx="${WINE_TOOL_DIR:-}/$p-w64-mingw32-clang++"
-      if [[ -x "$cand_cxx" ]] && probe_crt "$cand_cxx"; then
-        TOOL_DIR="$WINE_TOOL_DIR"
-        CXX="$cand_cxx"; CC="$WINE_TOOL_DIR/$p-w64-mingw32-clang"
-        export TOOL_DIR WINE_TOOL_DIR CXX CC
-        ok "[$target] msvcrt via LLVM-MinGW msvcrt instalado no Termux"; return 0
-      fi
-    else
-      LLVM_CRT=msvcrt prepare_tools || true
-      cand_cxx="$TOOL_DIR/${p}-w64-mingw32-clang++"
-      if [[ "$TOOL_DIR" != "$saved_tool" && -x "$cand_cxx" ]] && probe_crt "$cand_cxx"; then
-        WINE_TOOL_DIR="$TOOL_DIR"; CXX="$cand_cxx"; CC="$TOOL_DIR/${p}-w64-mingw32-clang"; export WINE_TOOL_DIR CXX CC
-        ok "[$target] msvcrt via LLVM-MinGW msvcrt baixado"; return 0
-      fi
+    prepare_termux_msvcrt_toolchain || true
+    cand_cxx="$TOOL_DIR/${p}-w64-mingw32-clang++"
+    if [[ -x "$cand_cxx" ]] && probe_crt "$cand_cxx"; then
+      WINE_TOOL_DIR="$TOOL_DIR"; CXX="${WEB2EXE_QEMU_BIN:-$TOOL_DIR}/${p}-w64-mingw32-clang++"; CC="${WEB2EXE_QEMU_BIN:-$TOOL_DIR}/${p}-w64-mingw32-clang"; export WINE_TOOL_DIR CXX CC
+      if [[ -x "${WEB2EXE_QEMU_BIN:-}/llvm-windres" ]]; then RC="$WEB2EXE_QEMU_BIN/llvm-windres"; export RC; fi
+      ok "[$target] msvcrt via LLVM-MinGW msvcrt + QEMU"
+      return 0
+    fi
+    TOOL_DIR="$saved_tool"; LLVM_ROOT="$saved_root"; export TOOL_DIR LLVM_ROOT
+  fi
+  # Linux comum (não Termux): baixa o LLVM-MinGW msvcrt diretamente.
+  if [[ "${PREFIX:-}" != *com.termux* && -z "${WEB2EXE_WINE_NO_DOWNLOAD:-}" ]]; then
+    local saved_tool="$TOOL_DIR" saved_root="${LLVM_ROOT:-}"
+    LLVM_CRT=msvcrt prepare_tools || true
+    cand_cxx="$TOOL_DIR/${p}-w64-mingw32-clang++"
+    if [[ "$TOOL_DIR" != "$saved_tool" && -x "$cand_cxx" ]] && probe_crt "$cand_cxx"; then
+      WINE_TOOL_DIR="$TOOL_DIR"; CXX="$cand_cxx"; CC="$TOOL_DIR/${p}-w64-mingw32-clang"; export WINE_TOOL_DIR CXX CC
+      ok "[$target] msvcrt via LLVM-MinGW msvcrt baixado"; return 0
     fi
     TOOL_DIR="$saved_tool"; LLVM_ROOT="$saved_root"; export TOOL_DIR LLVM_ROOT
   fi
