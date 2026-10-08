@@ -282,12 +282,18 @@ probe_crt() {
 #include <string>
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR a, int) { std::wstring s = a ? a : L""; std::error_code e; return (int)(s.size() + std::filesystem::exists(L"C:\\", e)); }
 CPPEOF
-  rm -f "$d/p.exe"
-  if [[ -n "${WEB2EXE_QEMU_BIN:-}" && "$cxx" == "$TOOL_DIR/"* ]]; then
-    PATH="$WEB2EXE_QEMU_BIN:$PATH" "$cxx" "$@" -std=c++20 -O1 -static -fuse-ld=lld -DUNICODE -D_UNICODE -municode -mwindows "$d/p.cpp" -o "$d/p.exe" >"$d/log.txt" 2>&1 || return 2
-  else
-    "$cxx" "$@" -std=c++20 -O1 -static -fuse-ld=lld -DUNICODE -D_UNICODE -municode -mwindows "$d/p.cpp" -o "$d/p.exe" >"$d/log.txt" 2>&1 || return 2
+  rm -f "$d/p.exe" "$d/p.o"
+  # Compila e liga em DOIS comandos. Compilar+ligar num só faz o clang abrir o cc1 como processo separado
+  # (executável x86_64); sob QEMU isso falha com "unable to execute command: No such file or directory".
+  # Só compilar (-c) roda o cc1 dentro do próprio processo.
+  local pre=()
+  if [[ -n "${WEB2EXE_QEMU_BIN:-}" && "$cxx" == "$TOOL_DIR/"* ]]; then pre=(env "PATH=$WEB2EXE_QEMU_BIN:$PATH"); fi
+  if ! "${pre[@]+"${pre[@]}"}" "$cxx" "$@" -std=c++20 -O1 -DUNICODE -D_UNICODE -c "$d/p.cpp" -o "$d/p.o" >"$d/log.txt" 2>&1; then
+    # Diagnóstico: o mesmo comando com -v mostra o caminho/linha do cc1 que o clang tentou executar.
+    { printf '\n===== repetindo com -v =====\n'; "${pre[@]+"${pre[@]}"}" "$cxx" "$@" -v -std=c++20 -O1 -DUNICODE -D_UNICODE -c "$d/p.cpp" -o "$d/p.o" 2>&1 || true; } >>"$d/log.txt"
+    return 2
   fi
+  "${pre[@]+"${pre[@]}"}" "$cxx" "$@" -static -fuse-ld=lld -municode -mwindows "$d/p.o" -o "$d/p.exe" >>"$d/log.txt" 2>&1 || return 2
   [[ -f "$d/p.exe" ]] || return 2
   pe_uses_ucrt "$d/p.exe" && return 1
   return 0
@@ -304,26 +310,54 @@ fix_sysroot_symlinks() {
   done < <(find "$root" -type l -print0)
 }
 
+# Procura o Box64 no Termux. No Termux ele roda via glibc: pacote "box64-glibc" + "glibc-runner" (comando grun).
+#   WEB2EXE_EMU=auto (padrão: Box64 se existir, senão QEMU) | box64 | qemu
+# Define BOX_RUN (array com o comando que executa o box64). Devolve 1 se não houver Box64 utilizável.
+BOX_RUN=()
+detect_box64() {
+  local b g=""
+  BOX_RUN=()
+  b="$(command -v box64 2>/dev/null || true)"
+  [[ -n "$b" ]] || { [[ -n "${PREFIX:-}" && -x "$PREFIX/glibc/bin/box64" ]] && b="$PREFIX/glibc/bin/box64"; }
+  [[ -n "$b" ]] || return 1
+  if env -u LD_PRELOAD "$b" --version >/dev/null 2>&1; then BOX_RUN=("$b"); return 0; fi
+  g="$(command -v grun 2>/dev/null || true)"
+  if [[ -n "$g" ]] && env -u LD_PRELOAD "$g" "$b" --version >/dev/null 2>&1; then BOX_RUN=("$g" "$b"); return 0; fi
+  return 1
+}
+
 # Instala o LLVM-MinGW msvcrt x86_64 para Termux ARM64 sem PRoot/rootfs completo.
 # A cadeia fica: Termux ARM64 -> QEMU x86_64 -> glibc mínimo -> LLVM-MinGW x86_64.
 # Em caso de falha devolve 1 (com aviso) para o chamador poder tentar outro caminho.
 prepare_termux_msvcrt_toolchain() {
   [[ -n "${PREFIX:-}" && -d "$PREFIX" ]] || { warn "PREFIX do Termux não está disponível."; return 1; }
-  local qemu; qemu="$(command -v qemu-x86_64 || true)"
-  if [[ -z "$qemu" ]]; then
-    command -v pkg >/dev/null 2>&1 || { warn "pkg ausente; não foi possível instalar qemu-user-x86-64."; return 1; }
-    log "Instalando suporte QEMU x86_64..."
-    pkg install -y qemu-user-x86-64 dpkg file || { warn "Falha ao instalar qemu-user-x86-64/dpkg/file."; return 1; }
-    qemu="$(command -v qemu-x86_64 || true)"
+  local emu="${WEB2EXE_EMU:-auto}" qemu="" box_libpath=""
+  if [[ "$emu" != qemu ]] && detect_box64; then
+    emu=box64
+  elif [[ "$emu" == box64 ]]; then
+    warn "WEB2EXE_EMU=box64, mas o Box64 não está utilizável. Instale: pacman -S box64-glibc glibc-runner (veja o README)."; return 1
+  else
+    emu=qemu
   fi
-  [[ -n "$qemu" ]] || { warn "qemu-x86_64 não foi encontrado após a instalação."; return 1; }
+  if [[ "$emu" == qemu ]]; then
+    qemu="$(command -v qemu-x86_64 || true)"
+    if [[ -z "$qemu" ]]; then
+      command -v pkg >/dev/null 2>&1 || { warn "pkg ausente; não foi possível instalar qemu-user-x86-64."; return 1; }
+      log "Instalando suporte QEMU x86_64..."
+      pkg install -y qemu-user-x86-64 dpkg file || { warn "Falha ao instalar qemu-user-x86-64/dpkg/file."; return 1; }
+      qemu="$(command -v qemu-x86_64 || true)"
+    fi
+    [[ -n "$qemu" ]] || { warn "qemu-x86_64 não foi encontrado após a instalação."; return 1; }
+  fi
+  log "Emulador x86_64: $emu"
   local t
   for t in dpkg-deb file xz gzip realpath; do
     command -v "$t" >/dev/null 2>&1 || { warn "'$t' ausente. Instale: pkg install dpkg file xz-utils gzip coreutils"; return 1; }
   done
 
   local base="$CACHE/llvm-mingw-msvcrt"
-  local sysroot="$base/sysroot" debs="$base/debs" qbin="$base/qemu-bin"
+  local sysroot="$base/sysroot" debs="$base/debs" qbin="$base/qemu-bin" boxbin="$base/box-bin"
+  box_libpath="$sysroot/lib/x86_64-linux-gnu:$sysroot/usr/lib/x86_64-linux-gnu"
   mkdir -p "$base" "$debs"
 
   # Toolchain: o tarball msvcrt é compilado em Ubuntu 22.04/20.04 (glibc 2.35/2.31 — compatível com o sysroot jammy).
@@ -382,19 +416,29 @@ prepare_termux_msvcrt_toolchain() {
   # write_wrapper <arquivo> <argv0|-> <exe> [args fixos...]: script que roda <exe> sob QEMU.
   # argv0 importa: llvm-ar/llvm-ranlib, ld.lld/lld, llvm-windres/llvm-rc são binários "multi-call".
   write_wrapper() {
-    local out="$1" a0="$2" exe="$3" x; shift 3
+    local out="$1" a0="$2" exe="$3" x target; shift 3
     {
       printf '#!%s/bin/bash\n' "$PREFIX"
-      printf 'exec env -u LD_PRELOAD %q -U LD_PRELOAD' "$qemu"
-      [[ "$a0" == - ]] || printf ' -0 %q' "$a0"
-      printf ' -L %q %q' "$sysroot" "$exe"
+      if [[ "$emu" == box64 ]]; then
+        # Box64: argv[0] = caminho com que o programa é chamado, então usamos um symlink com o nome desejado.
+        target="$exe"
+        if [[ "$a0" != - ]]; then target="$boxbin/$(basename "$a0")"; ln -sfn "$exe" "$target"; fi
+        printf 'export BOX64_LD_LIBRARY_PATH=%q BOX64_LOG=0 BOX64_NOBANNER=1\n' "$box_libpath"
+        printf 'exec env -u LD_PRELOAD'
+        for x in "${BOX_RUN[@]}"; do printf ' %q' "$x"; done
+        printf ' %q' "$target"
+      else
+        printf 'exec env -u LD_PRELOAD %q -U LD_PRELOAD' "$qemu"
+        [[ "$a0" == - ]] || printf ' -0 %q' "$a0"
+        printf ' -L %q %q' "$sysroot" "$exe"
+      fi
       for x in "$@"; do printf ' %q' "$x"; done
       printf ' "$@"\n'
     } > "$out"
     chmod 755 "$out"
   }
 
-  rm -rf "$qbin"; mkdir -p "$qbin"
+  rm -rf "$qbin" "$boxbin"; mkdir -p "$qbin" "$boxbin"
   local f n real
   while IFS= read -r -d '' f; do
     n="$(basename "$f")"
@@ -404,26 +448,85 @@ prepare_termux_msvcrt_toolchain() {
     fi
   done < <(find "$toolroot/bin" -maxdepth 1 \( -type f -o -type l \) -print0)
 
-  # Compiladores por alvo. clang++ PRECISA de --driver-mode=g++ (senão não liga a libc++ e o link falha).
-  local arch kind
-  for arch in i686 x86_64; do
-    write_wrapper "$qbin/${arch}-w64-mingw32-clang" - "$clang_real" "--target=${arch}-w64-windows-gnu" \
-      "--resource-dir=$clang_resource" "--sysroot=$toolroot" "--config-system-dir=$toolroot/bin" "-B$qbin"
-    write_wrapper "$qbin/${arch}-w64-mingw32-clang++" - "$clang_real" --driver-mode=g++ "--target=${arch}-w64-windows-gnu" \
-      "--resource-dir=$clang_resource" "--sysroot=$toolroot" "--config-system-dir=$toolroot/bin" "-B$qbin"
-  done
-  write_wrapper "$qbin/clang"   - "$clang_real" "--resource-dir=$clang_resource" "--sysroot=$toolroot" "--config-system-dir=$toolroot/bin" "-B$qbin"
-  write_wrapper "$qbin/clang++" - "$clang_real" --driver-mode=g++ "--resource-dir=$clang_resource" "--sysroot=$toolroot" "--config-system-dir=$toolroot/bin" "-B$qbin"
+  # O clang dispara o cc1 como PROCESSO SEPARADO, executando o caminho dele mesmo (/proc/self/exe = ELF x86_64).
+  # Sob QEMU isso falha ("unable to execute command: No such file or directory"), porque o kernel do Android
+  # não executa binário x86_64. Solução: o clang passa a se enxergar como um SCRIPT (argv[0] via QEMU -0 +
+  # -no-canonical-prefixes) que reexecuta o clang real sob QEMU. O script fica em toolroot/bin para que o
+  # diretório de instalação (headers da libc++, lib/clang, *.cfg) continue sendo o do toolchain.
+  local spawn="-" nocanon=()
+  if [[ "$emu" == qemu ]]; then
+    spawn="$toolroot/bin/clang-qemu-spawn"; nocanon=("-no-canonical-prefixes")
+    write_wrapper "$spawn" - "$clang_real"
+  fi   # (no Box64 o próprio emulador intercepta o exec de binários x86_64, sem wrapper de spawn)
 
-  # Teste de sanidade: o clang x86_64 executa mesmo sob QEMU?
-  local v
-  v="$("$qbin/x86_64-w64-mingw32-clang" --version 2>&1)" || { warn "clang x86_64 não executa sob QEMU: $v"; return 1; }
+  # clang++ PRECISA de --driver-mode=g++ (senão não liga a libc++ e o link falha).
+  local common_flags=(${nocanon[@]+"${nocanon[@]}"} "-resource-dir=$clang_resource" "--sysroot=$toolroot" "--config-system-dir=$toolroot/bin" "-B$qbin")
+  local arch
+  for arch in i686 x86_64; do
+    write_wrapper "$qbin/${arch}-w64-mingw32-clang"   "$spawn" "$clang_real" "--target=${arch}-w64-windows-gnu" "${common_flags[@]}"
+    write_wrapper "$qbin/${arch}-w64-mingw32-clang++" "$spawn" "$clang_real" --driver-mode=g++ "--target=${arch}-w64-windows-gnu" "${common_flags[@]}"
+  done
+  write_wrapper "$qbin/clang"   "$spawn" "$clang_real" "${common_flags[@]}"
+  write_wrapper "$qbin/clang++" "$spawn" "$clang_real" --driver-mode=g++ "${common_flags[@]}"
+
+  # llvm-windres/llvm-rc chama o preprocessador "<triple>-clang -E ..." procurando PRIMEIRO na pasta do próprio
+  # llvm-rc (toolroot/bin), onde esse nome é um script que executa o clang x86_64 direto (sem QEMU) e falha com
+  # "not executable: 64-bit ELF file". Trocamos esses nomes pelos nossos wrappers (que rodam via QEMU).
+  local kind
+  for arch in i686 x86_64; do
+    for kind in clang clang++; do
+      rm -f "$toolroot/bin/${arch}-w64-mingw32-${kind}"
+      cp -f "$qbin/${arch}-w64-mingw32-${kind}" "$toolroot/bin/${arch}-w64-mingw32-${kind}"
+    done
+  done
+  # windres com prefixo do alvo (o llvm-rc deduz alvo/preprocessador do argv[0]): sem isso o recurso sai x64 no exe x86.
+  local rc_real; rc_real="$(readlink -f "$toolroot/bin/llvm-windres" 2>/dev/null || true)"
+  if [[ -n "$rc_real" ]] && file "$rc_real" 2>/dev/null | grep -q 'ELF 64-bit.*x86-64'; then
+    for arch in i686 x86_64; do
+      write_wrapper "$qbin/${arch}-w64-mingw32-windres" "${arch}-w64-mingw32-windres" "$rc_real"
+    done
+  fi
+
+  # Bibliotecas extras que o clang do release costuma pedir (clang-23: libzstd, libtinfo6...).
+  # Instaladas individualmente no sysroot já existente (marcador por pacote).
+  sysroot_add_pkg() {
+    local pk="$1" f
+    [[ -e "$sysroot/.w2e-pkg-$pk" ]] && return 0
+    ubuntu_deb "$pk" "$debs" || return 1
+    f="$DEB_FILE"
+    dpkg-deb -x "$f" "$sysroot" || { rm -f "$f"; return 1; }
+    fix_sysroot_symlinks "$sysroot"
+    : > "$sysroot/.w2e-pkg-$pk"
+  }
+  for p in libzstd1 libtinfo6 liblzma5; do
+    sysroot_add_pkg "$p" || warn "Não consegui instalar '$p' no sysroot (seguindo; o teste abaixo diz se faz falta)."
+  done
+
+  # Teste de sanidade: o clang x86_64 executa mesmo sob QEMU? Se faltar uma biblioteca (.so), descobre o
+  # pacote Ubuntu correspondente, instala no sysroot e tenta de novo.
+  local v tries=0 so pk
+  while ! v="$("$qbin/x86_64-w64-mingw32-clang" --version 2>&1)"; do
+    so="$(grep -o 'lib[A-Za-z0-9_+-]*\.so\.[0-9.]*' <<<"$v" | head -n1)"
+    case "$so" in
+      libzstd.so.1)  pk=libzstd1;;   libtinfo.so.6) pk=libtinfo6;;  libtinfo.so.5) pk=libtinfo5;;
+      liblzma.so.5)  pk=liblzma5;;   libz.so.1)     pk=zlib1g;;     libxml2.so.2)  pk=libxml2;;
+      libedit.so.2)  pk=libedit2;;   libffi.so.8)   pk=libffi8;;    libbsd.so.0)   pk=libbsd0;;
+      libmd.so.0)    pk=libmd0;;     libicuuc.so.70) pk=libicu70;;  libncurses.so.6) pk=libncurses6;;
+      libgcc_s.so.1) pk=libgcc-s1;;  libstdc++.so.6) pk=libstdc++6;; *) pk="";;
+    esac
+    if [[ -z "$pk" || $((++tries)) -gt 8 ]]; then
+      warn "clang x86_64 não executa sob QEMU: $v"; return 1
+    fi
+    log "Biblioteca ausente no sysroot: $so -> pacote $pk"
+    rm -f "$sysroot/.w2e-pkg-$pk"
+    sysroot_add_pkg "$pk" || { warn "Não consegui instalar '$pk' ($so). Erro original: $v"; return 1; }
+  done
 
   export PATH="$qbin:$toolroot/bin:$PATH"
   export WEB2EXE_QEMU_SYSROOT="$sysroot" WEB2EXE_QEMU_BIN="$qbin"
   TOOL_DIR="$qbin"; LLVM_ROOT="$toolroot"
   export TOOL_DIR LLVM_ROOT
-  ok "LLVM-MinGW msvcrt x86_64 + glibc mínimo pronto (sem Ubuntu Base/PRoot)"
+  ok "LLVM-MinGW msvcrt x86_64 + glibc mínimo pronto (scripts r6: emulador=$emu)"
 }
 
 # Define WINE_CXX/WINE_CC/WINE_FLAGS para x86|x64 (chamada por select_toolchain).
@@ -453,9 +556,16 @@ select_wine_crt() {
     cand_cxx="$TOOL_DIR/${p}-w64-mingw32-clang++"
     if [[ -x "$cand_cxx" ]] && probe_crt "$cand_cxx"; then
       WINE_TOOL_DIR="$TOOL_DIR"; CXX="${WEB2EXE_QEMU_BIN:-$TOOL_DIR}/${p}-w64-mingw32-clang++"; CC="${WEB2EXE_QEMU_BIN:-$TOOL_DIR}/${p}-w64-mingw32-clang"; export WINE_TOOL_DIR CXX CC
-      if [[ -x "${WEB2EXE_QEMU_BIN:-}/llvm-windres" ]]; then RC="$WEB2EXE_QEMU_BIN/llvm-windres"; export RC; fi
+      if   [[ -x "${WEB2EXE_QEMU_BIN:-}/${p}-w64-mingw32-windres" ]]; then RC="$WEB2EXE_QEMU_BIN/${p}-w64-mingw32-windres"; export RC
+      elif [[ -x "${WEB2EXE_QEMU_BIN:-}/llvm-windres" ]]; then RC="$WEB2EXE_QEMU_BIN/llvm-windres"; export RC; fi
       ok "[$target] msvcrt via LLVM-MinGW msvcrt + QEMU"
       return 0
+    fi
+    # Mostra POR QUE o teste falhou (antes só aparecia um código genérico).
+    if [[ -x "$cand_cxx" ]]; then
+      probe_crt "$cand_cxx" && rc=0 || rc=$?
+      if [[ $rc == 1 ]]; then warn "[$target] o toolchain msvcrt gerou binário que ainda importa a UCRT."
+      else warn "[$target] a compilação de teste sob QEMU falhou (rc=$rc). Últimas linhas do compilador:"; tail -n 40 "$TMP_DIR/crtprobe/log.txt" >&2 || true; fi
     fi
     TOOL_DIR="$saved_tool"; LLVM_ROOT="$saved_root"; export TOOL_DIR LLVM_ROOT
   fi

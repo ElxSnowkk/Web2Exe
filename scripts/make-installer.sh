@@ -50,8 +50,11 @@ case "$(basename "$RC")" in
   *windres*) "$RC" -O coff -i "$W/installer.rc" -o "$rc_obj" -c 65001;;
   *)         "$RC" /fo "$W/installer.res" "$W/installer.rc"; rc_obj="$W/installer.res";;
 esac
-"$CXX" ${WINE_FLAGS[@]+"${WINE_FLAGS[@]}"} -std=c++20 -O2 -s -static -fuse-ld=lld -DUNICODE -D_UNICODE -municode -mwindows \
-  "$W/installer.cpp" "$rc_obj" -o "$out" \
+# Dois passos (compilar, depois ligar): compilar+ligar num comando só faz o clang abrir o cc1 como processo
+# separado, o que não funciona sob QEMU (Termux).
+"$CXX" ${WINE_FLAGS[@]+"${WINE_FLAGS[@]}"} -std=c++20 -O2 -DUNICODE -D_UNICODE -c "$W/installer.cpp" -o "$W/installer.o"
+"$CXX" ${WINE_FLAGS[@]+"${WINE_FLAGS[@]}"} -s -static -fuse-ld=lld -municode -mwindows \
+  "$W/installer.o" "$rc_obj" -o "$out" \
   -lshell32 -lole32 -loleaut32 -ladvapi32 -luser32 -lgdi32 -lcomctl32 -luuid
 [[ -f "$out" ]] || fail "Instalador não foi gerado"
 if [[ "${WINE_COMPAT:-0}" == 1 ]]; then verify_wine_pe "$out" "instalador"; fi

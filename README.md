@@ -80,3 +80,18 @@ Nenhuma etapa falha em silêncio: toda falha de execução imprime `[ERR ]` com 
 ## Arquitetura
 
 Ver `docs/TECHNICAL-NOTES.md`.
+
+## Emulador x86_64 no Termux (modo Wine): Box64 ou QEMU
+
+O toolchain msvcrt do modo Wine é x86_64 e precisa de um emulador no Termux ARM64.
+`WEB2EXE_EMU=auto` (padrão) usa o **Box64** se estiver instalado e cai para o **QEMU** se não estiver.
+
+Instalar o Box64 (roda via glibc no Termux):
+
+    pkg install glibc-repo        # repositório de pacotes glibc
+    pkg install glibc-runner      # comando grun
+    pkg install box64-glibc       # se o pkg não achar: pacman -S box64-glibc glibc-runner
+    pkg search box64              # confira o nome real do pacote no seu repositório
+
+Forçar um emulador: `WEB2EXE_EMU=box64 web2exe build` ou `WEB2EXE_EMU=qemu web2exe build`.
+Sem a variante Wine (`WINE_COMPAT=0`) nenhum emulador é necessário.
