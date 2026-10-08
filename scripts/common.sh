@@ -230,24 +230,28 @@ CPPEOF
 # O glibc-runner permite executá-lo diretamente no kernel Android sem trocar o modo
 # principal do Web2Exe de native para proot/chroot.
 prepare_termux_msvcrt_tools() {
-  local p="$1" arch tar dir real_bin wrap_bin t
+  local p="$1" arch tar dir real_bin wrap_bin t name
   [[ -n "${PREFIX:-}" && -d "$PREFIX" ]] || return 1
   command -v pkg >/dev/null 2>&1 || return 1
 
+  # O LLVM-MinGW MSVCRT distribuído oficialmente é um binário Linux/glibc.
+  # No Termux, instale o runtime glibc uma única vez e use glibc-runner para
+  # executar o toolchain, sem alterar o modo nativo do Web2Exe.
   if ! command -v glibc-runner >/dev/null 2>&1; then
-    log "Wine/MSVCRT: instalando glibc-runner para o toolchain Linux"
-    pkg install -y glibc-repo >/dev/null 2>&1 || true
-    pkg install -y glibc-runner >/dev/null 2>&1 || true
+    log "Wine/MSVCRT: instalando suporte glibc do Termux..."
+    pkg update -y || return 1
+    pkg install -y glibc-repo || return 1
+    pkg update -y || return 1
+    pkg install -y glibc glibc-runner || return 1
+  elif [[ ! -d "$PREFIX/glibc" ]]; then
+    log "Wine/MSVCRT: instalando runtime glibc do Termux..."
+    pkg install -y glibc || return 1
   fi
-  command -v glibc-runner >/dev/null 2>&1 || {
-    warn "glibc-runner não pôde ser instalado; não é possível executar o LLVM-MinGW glibc no Termux."
-    return 1
-  }
+  command -v glibc-runner >/dev/null 2>&1 || return 1
+  [[ -d "$PREFIX/glibc" ]] || return 1
 
-  command -v xz >/dev/null 2>&1 || {
-    pkg install -y xz-utils >/dev/null 2>&1 || true
-  }
-  command -v xz >/dev/null 2>&1 || return 1
+  command -v xz >/dev/null 2>&1 || pkg install -y xz-utils || return 1
+  command -v tar >/dev/null 2>&1 || return 1
 
   case "$(uname -m)" in
     aarch64|arm64) arch=aarch64;;
@@ -262,18 +266,22 @@ prepare_termux_msvcrt_tools() {
   if [[ ! -x "$dir/bin/${p}-w64-mingw32-clang++" ]]; then
     fetch "$LLVM_BASE/llvm-mingw-${LLVM_VERSION}-msvcrt-ubuntu-24.04-${arch}.tar.xz" "$tar"
     rm -rf "$dir"; mkdir -p "$dir"
-    tar -xJf "$tar" -C "$dir" --strip-components=1
+    tar -xJf "$tar" -C "$dir" --strip-components=1 || {
+      rm -rf "$dir"
+      fail "Falha ao extrair o LLVM-MinGW MSVCRT: $tar"
+    }
   fi
+  [[ -x "$dir/bin/${p}-w64-mingw32-clang++" ]] || return 1
 
   real_bin="$dir/bin"
   wrap_bin="$CACHE/llvm-mingw/${LLVM_VERSION}-msvcrt-${arch}-termux-bin"
-  mkdir -p "$wrap_bin"
+  rm -rf "$wrap_bin"; mkdir -p "$wrap_bin"
 
-  # Cada executável glibc do toolchain recebe um wrapper Termux. O wrapper chama
-  # glibc-runner e preserva o caminho real, para que clang encontre seu resource-dir.
+  # O wrapper mantém o caminho real do executável no argv[0], permitindo que
+  # o Clang encontre seus cfg/resource files dentro do toolchain extraído.
   for t in "$real_bin"/*; do
     [[ -f "$t" && -x "$t" ]] || continue
-    local name; name="$(basename "$t")"
+    name="$(basename "$t")"
     cat > "$wrap_bin/$name" <<EOF
 #!${BASH:-/data/data/com.termux/files/usr/bin/bash}
 exec glibc-runner "$t" "\$@"
@@ -281,8 +289,8 @@ EOF
     chmod 755 "$wrap_bin/$name"
   done
 
-  # Clang descobre lld/llvm-rc por PATH durante a compilação.
-  PATH="$wrap_bin:$real_bin:$PATH" export PATH
+  PATH="$wrap_bin:$real_bin:$PATH"
+  export PATH
   WINE_TOOL_DIR="$wrap_bin"
   export WINE_TOOL_DIR
   ok "LLVM-MinGW msvcrt instalado: $dir (wrappers Termux: $wrap_bin)"
