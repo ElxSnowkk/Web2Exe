@@ -93,5 +93,5 @@ Instalar o Box64 (roda via glibc no Termux):
     pkg install box64-glibc       # se o pkg não achar: pacman -S box64-glibc glibc-runner
     pkg search box64              # confira o nome real do pacote no seu repositório
 
-Forçar um emulador: `WEB2EXE_EMU=box64 web2exe build` ou `WEB2EXE_EMU=qemu web2exe build`.
+Escolher o emulador no `build.prop`: `WINE_EMU=box64` (ou `qemu`, ou `auto`). A variável de ambiente `WEB2EXE_EMU=box64 web2exe build` tem prioridade sobre o arquivo.
 Sem a variante Wine (`WINE_COMPAT=0`) nenhum emulador é necessário.

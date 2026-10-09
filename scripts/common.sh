@@ -57,6 +57,10 @@ prop_load() {
   # auto (padrão) = o instalador inclui a variante Wine se o toolchain conseguir gerá-la; 1 = obrigatório; 0 = não incluir.
   WINE_COMPAT="${WEB2EXE_WINE:-${PROP[WINE_COMPAT]:-auto}}"
   case "${WINE_COMPAT,,}" in 1|true|yes|on|sim) WINE_COMPAT=1;; 0|false|no|off|nao|não) WINE_COMPAT=0;; *) WINE_COMPAT=auto;; esac
+  # Emulador x86_64 do modo Wine no Termux: auto (Box64 se existir, senão QEMU) | box64 | qemu. A variável de ambiente vence o build.prop.
+  WEB2EXE_EMU="${WEB2EXE_EMU:-${PROP[WINE_EMU]:-auto}}"
+  case "${WEB2EXE_EMU,,}" in auto|box64|qemu) WEB2EXE_EMU="${WEB2EXE_EMU,,}";; *) fail "WINE_EMU deve ser auto, box64 ou qemu (recebi: $WEB2EXE_EMU)";; esac
+  export WEB2EXE_EMU
   [[ "$APP_LOGO" == "~/"* ]] && APP_LOGO="$HOME/${APP_LOGO#\~/}"
   [[ "$APP_ICON" == "~/"* ]] && APP_ICON="$HOME/${APP_ICON#\~/}"
   if [[ -n "$APP_LOGO" && "$APP_LOGO" != /* ]]; then APP_LOGO="$PROJECT_ROOT/$APP_LOGO"; fi

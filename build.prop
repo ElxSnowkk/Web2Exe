@@ -14,3 +14,5 @@ APP_ICON=assets/icon.ico
 INSTALL_DIR=Meu Aplicativo
 # Variante Wine dentro do instalador único: auto | 1 (obrigatória) | 0 (não incluir)
 WINE_COMPAT=auto
+# Emulador x86_64 do modo Wine no Termux: auto (Box64 se instalado, senão QEMU) | box64 | qemu
+WINE_EMU=auto

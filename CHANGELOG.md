@@ -7,6 +7,7 @@
 - `build.sh` testa o toolchain msvcrt **antes** de compilar; com `WINE_COMPAT=1` e sem toolchain, aborta na hora (antes só falhava no fim, depois de x86/x64/arm64).
 - Wrappers QEMU: `clang++` agora usa `--driver-mode=g++` (sem isso o link com libc++ falhava); `argv[0]` preservado para binários multi-call (`ld.lld`, `llvm-ar`, `llvm-windres`); `-B` para o clang achar o `ld.lld` embrulhado; `clang` real resolvido por `readlink -f`.
 - Symlinks absolutos do sysroot (`/lib64/ld-linux-x86-64.so.2`) viram relativos; sem isso o QEMU `-L` não achava o loader.
+- `build.prop` aceita `WINE_EMU=auto|box64|qemu` (validado pelo CLI).
 - Emulador x86_64 selecionável: Box64 (mais rápido; via box64-glibc + glibc-runner) ou QEMU, WEB2EXE_EMU=auto|box64|qemu. No Box64 os wrappers usam symlinks para o argv[0] e dispensam o wrapper de spawn do cc1.
 - windres sob QEMU: os scripts <arch>-w64-mingw32-clang(++) dentro do toolroot são trocados pelos wrappers QEMU (o llvm-rc os procura ali) e o RC passa a ser <arch>-w64-mingw32-windres (resource com a arquitetura do alvo).
 - cc1 sob QEMU: o clang passa a ter argv[0] = script (clang-qemu-spawn) + -no-canonical-prefixes, então o processo cc1 que ele dispara roda via QEMU; o probe repete com -v quando falha.

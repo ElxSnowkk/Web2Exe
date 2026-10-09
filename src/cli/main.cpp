@@ -188,6 +188,10 @@ static bool validate(const Props& c, std::string& why) {
             why = "WINE_COMPAT deve ser auto, 0 ou 1"; return false;
         }
     }
+    if (c.count("WINE_EMU")) {
+        std::string e = lower(c.at("WINE_EMU"));
+        if (e != "auto" && e != "box64" && e != "qemu" && !e.empty()) { why = "WINE_EMU deve ser auto, box64 ou qemu"; return false; }
+    }
     std::error_code ec;
     if (logo.empty() || !fs::is_regular_file(logo, ec)) { why = "APP_LOGO não aponta para um arquivo: " + logo; return false; }
     std::ifstream lg(logo, std::ios::binary);
@@ -308,7 +312,8 @@ static void help() {
 "  APP_LOGO=/caminho/logo.png\n"
 "  APP_ICON=/caminho/icone.ico\n"
 "  INSTALL_DIR=Meu Aplicativo\n"
-"  WINE_COMPAT=auto               (opcional: auto | 1 | 0 — variante Wine dentro do instalador)\n\n"
+"  WINE_COMPAT=auto               (opcional: auto | 1 | 0 — variante Wine dentro do instalador)\n"
+"  WINE_EMU=auto                  (opcional: auto | box64 | qemu — emulador x86_64 do modo Wine no Termux)\n\n"
 "Linhas indentadas continuam o valor da propriedade anterior.\n";
 }
 
